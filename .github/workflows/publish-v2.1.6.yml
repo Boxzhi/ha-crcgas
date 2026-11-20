@@ -1,0 +1,52 @@
+name: Publish v2.1.6
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-v2.1.6.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.repository == 'Boxzhi/ha-crcgas'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 69a171b0cf36c9ec482adfd599ea63ba98da620f
+          persist-credentials: false
+      - name: Publish tested release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "69a171b0cf36c9ec482adfd599ea63ba98da620f"
+          test "$(python -c 'import json; print(json.load(open("custom_components/crcgas/manifest.json"))["version"])')" = "2.1.6"
+          if gh release view v2.1.6 >/dev/null 2>&1; then
+            echo "Release already exists"
+            exit 0
+          fi
+          if gh api "repos/$GH_REPO/git/ref/tags/v2.1.6" >/dev/null 2>&1; then
+            echo "Existing tag requires verification"
+            exit 1
+          fi
+          cat > release-notes.md <<'RELEASE_NOTES'
+          - 首次 Token 刷新结束后再启动业务平台，避免启动时使用已轮换的认证信息。
+          - 所有云端请求与刷新共享异步锁；重叠刷新合并，明确会话超时后允许受限的恢复刷新，并仅在凭据发生变化时重试一次业务查询。
+          - 持久化刷新返回的 wxCode；不再输出刷新原始响应或 HTTP 响应正文。
+          - 区分系统繁忙、网络失败、部分接口异常与明确认证失效，并按实际尝试的接口判断状态。
+          - 余额与欠费保留本次运行中最后有效值；首次无数据仍为未知，真实零值不丢失。
+          - 保留现有实体、日历调度、缴费历史及账单逻辑。
+
+          ## 升级说明
+          直接更新并重启 HA，保留原有认证、实体及定时配置，无须删除集成。
+          ## 测试
+          34 项 Python 测试、4 项 JavaScript 测试及 Hassfest 已通过。
+          实际联网及 HA 冷启动仍需验证。
+          RELEASE_NOTES
+          gh release create v2.1.6 --target "69a171b0cf36c9ec482adfd599ea63ba98da620f" --title "v2.1.6" --notes-file release-notes.md --latest
