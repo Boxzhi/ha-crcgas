@@ -1,0 +1,52 @@
+name: Publish v2.1.5
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-v2.1.5.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.repository == 'Boxzhi/ha-crcgas'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 09ffdec4053e844298da0c1b6ea234e0fa6665ba
+          persist-credentials: false
+      - name: Publish tested release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "09ffdec4053e844298da0c1b6ea234e0fa6665ba"
+          test "$(python -c 'import json; print(json.load(open("custom_components/crcgas/manifest.json"))["version"])')" = "2.1.5"
+          if gh release view v2.1.5 >/dev/null 2>&1; then
+            echo "v2.1.5 already exists; not modifying it"
+            exit 0
+          fi
+          if gh api "repos/$GH_REPO/git/ref/tags/v2.1.5" >/dev/null 2>&1; then
+            echo "Existing tag requires verification; refusing to replace it"
+            exit 1
+          fi
+          cat > release-notes.md <<'RELEASE_NOTES'
+          - 使用 HA 原生分步表单，选择小时、日、周、月后仅显示对应配置字段。
+          - 按小时固定间隔；日、周、月遵循 HA 时区的真实日历定时，短月份使用末日，夏令时重复时刻仅执行一次。
+          - 初始化立即刷新，手动刷新不重置计划；修改选项即时重排定时器；卸载时注销。
+          - 旧配置保留实际轮询周期，首次重新保存设置才启用新定时语义；不修改认证和实体 ID。
+          - 新增调度与生命周期回归测试。
+
+          ## 升级说明
+          原有登录凭据、实体 ID、历史账单及缴费缓存无需重新配置。
+          旧版按天/周/月配置保持原来的实际轮询间隔，请到集成配置中重新保存新表单启用定时功能。
+          ## 校验
+          - Python：23 项测试通过；JavaScript：4 项测试通过；Hassfest 通过。
+          - 尚未完成真实 HA 页面及联网长期运行测试。
+          RELEASE_NOTES
+          gh release create v2.1.5 --target "09ffdec4053e844298da0c1b6ea234e0fa6665ba" --title "v2.1.5" --notes-file release-notes.md --latest
