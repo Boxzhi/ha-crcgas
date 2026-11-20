@@ -371,14 +371,6 @@ v2.1.5 发布提交通过了 23 项 Python 单元测试、4 项 JavaScript 测�
 - 当前维护分支：[Boxzhi/ha-crcgas](https://github.com/Boxzhi/ha-crcgas)
 - 感谢原作者及社区贡献者。本项目为非官方开源集成，与华润燃气、微信及 Home Assistant 官方无隶属关系。
 
-### 支持原作者
-
-以下为上游项目原有赞助方式，保留原作者的赞助信息：
-
-| 微信支付 | 支付宝 |
-| :---: | :---: |
-| ![原作者微信赞助](sponsor/wechat.jpg) | ![原作者支付宝赞助](sponsor/alipay.jpg) |
-
 ## 许可证
 
 [MIT License](LICENSE)。保留上游版权及许可声明。
