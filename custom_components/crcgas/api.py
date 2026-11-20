@@ -34,6 +34,14 @@ class SessionTimeoutError(Exception):
     pass
 
 
+class TransportError(Exception):
+    """HTTP or network transport failure."""
+
+
+class ApiResponseError(Exception):
+    """Server returned an invalid or unsuccessful response."""
+
+
 class HuarunGasApi:
     """华润燃气 API客户端 - 使用 aiohttp（HA内置）"""
 
@@ -42,7 +50,7 @@ class HuarunGasApi:
         refresh_token: str,
         bo_token: str,
         wx_code: str,
-        on_token_refresh: Optional[Callable[[str, str], Awaitable[None]]] = None,
+        on_token_refresh: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
         session=None,  # 外部注入aiohttp session（从HA获取）
     ):
         self.refresh_token = refresh_token
@@ -50,6 +58,13 @@ class HuarunGasApi:
         self.wx_code = wx_code
         self._on_token_refresh = on_token_refresh
         self._session = session  # aiohttp.ClientSession
+        # All cloud I/O using these rotating credentials shares one lock.
+        self._auth_lock = asyncio.Lock()
+        self._generation = 0
+        self._refresh_attempt = 0
+        self._refresh_error = None
+        self._refresh_result = {}
+        self._last_recovery = float("-inf")
 
         # --- 日志节流（2026-11-01 加）---
         # 「会话超时」是**不可自愈**的终态：refresh-token 已失效，只能用户重新登录。
@@ -109,10 +124,10 @@ class HuarunGasApi:
         payload = self._decode_jwt_payload(token)
         if not payload:
             return None
-        exp = payload.get('exp', 0)
-        current = int(time.time())
-        remaining = exp - current
-        return max(0, remaining)
+        exp = payload.get("exp")
+        if isinstance(exp, bool) or not isinstance(exp, (int, float)):
+            return None
+        return max(0, exp - int(time.time()))
 
     def is_token_expiring_soon(self, threshold_seconds: int = 300) -> bool:
         """检查token是否即将过期（默认5分钟阈值）"""
@@ -132,20 +147,9 @@ class HuarunGasApi:
         成功响应：
           {"success": true, "msg": "操作成功", "dataResult": {dict or list}}
         """
-        msg = data.get("msg", "")
+        msg = str(data.get("msg") or "")
         status_code = data.get("statusCode", "")
-        data_result = data.get("dataResult")
-
-        if "会话超时" in msg:
-            return True
-        if "SESSION_TIMEOUT" in str(status_code).upper():
-            return True
-        if "系统繁忙" in msg:
-            return True
-        if isinstance(data_result, str):
-            if data_result.isdigit() and len(data_result) > 10:
-                return True
-        return False
+        return "会话超时" in msg or "SESSION_TIMEOUT" in str(status_code).upper()
 
     def _get_headers(self) -> dict:
         """获取请求头（动态更新token）"""
@@ -168,118 +172,113 @@ class HuarunGasApi:
             "Accept-Language": "zh-CN,zh;q=0.9",
         }
 
-    async def _request(
-        self,
-        method: str,
-        endpoint: str,
-        **kwargs,
-    ) -> Dict[str, Any]:
-        """
-        发送请求，自动检测会话超时等业务错误。
-        使用注入的 aiohttp session。
-        """
+    @property
+    def session_dead(self):
+        """Only an explicit refresh rejection establishes this flag."""
+        return self._session_dead
+
+    async def _exchange(self, method, endpoint, **kwargs):
+        """Single HTTP exchange. Caller owns the credential lock."""
         url = f"{BASE_URL}{endpoint}"
-        headers = self._get_headers()
-
-        _LOGGER.debug(f"请求: {method} {url}")
-
         try:
             async with self._session.request(
-                method,
-                url,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-                **kwargs,
+                method, url, headers=self._get_headers(),
+                timeout=aiohttp.ClientTimeout(total=30), **kwargs,
             ) as response:
                 if response.status != 200:
-                    text = await response.text()
-                    _LOGGER.error(f"HTTP {response.status}: {text[:200]}")
-                    raise Exception(f"HTTP {response.status}: {text[:100]}")
+                    raise TransportError(f"HTTP {response.status}: {endpoint}")
+                try:
+                    data = await response.json()
+                except (ValueError, aiohttp.ContentTypeError) as exc:
+                    raise ApiResponseError(f"Invalid JSON: {endpoint}") from exc
+        except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+            raise TransportError(f"{type(exc).__name__}: {endpoint}") from exc
+        if not isinstance(data, dict):
+            raise ApiResponseError(f"Invalid response: {endpoint}")
+        if self._is_session_timeout(data):
+            raise SessionTimeoutError(f"SESSION_TIMEOUT: {endpoint}")
+        if "系统繁忙" in str(data.get("msg") or ""):
+            raise ApiResponseError(f"Server busy: {endpoint}")
+        return data
 
-                data = await response.json()
-
-                # 检测华润API的"假成功"错误响应
-                if self._is_session_timeout(data):
-                    raise SessionTimeoutError(f"{data.get('msg')} ({data.get('statusCode')})")
-
+    async def _request(self, method, endpoint, **kwargs):
+        """Keep refresh and business exchanges mutually exclusive.
+        
+        Retry a read-only business query once, only after credential rotation.
+        Recovery refresh attempts are globally throttled per API instance.
+        """
+        async with self._auth_lock:
+            generation = self._generation
+            try:
+                data = await self._exchange(method, endpoint, **kwargs)
+            except SessionTimeoutError:
+                pass
+            else:
+                if data.get("success") is True:
+                    self._mark_session_alive()
                 return data
 
-        except SessionTimeoutError:
-            raise
-        except asyncio.TimeoutError:
-            _LOGGER.error(f"请求超时: {method} {url}")
-            raise Exception(f"请求超时: {url}")
-        except Exception as e:
-            _LOGGER.error(f"请求异常 ({type(e).__name__}): {e}")
-            raise
+        # Release the lock so an already queued refresh can complete first.
+        async with self._auth_lock:
+            if self._generation == generation and time.monotonic() - self._last_recovery >= 60:
+                self._last_recovery = time.monotonic()
+                try:
+                    await self._refresh_locked()
+                except (SessionTimeoutError, TransportError, ApiResponseError) as exc:
+                    _LOGGER.debug("认证恢复未完成: %s", type(exc).__name__)
+            if self._generation == generation:
+                raise SessionTimeoutError(f"SESSION_TIMEOUT: {endpoint}")
+            data = await self._exchange(method, endpoint, **kwargs)
+            if data.get("success") is True:
+                self._mark_session_alive()
+            return data
 
     async def async_refresh_token(self) -> Dict[str, Any]:
-        """
-        刷新 Token。
-        返回成功: {"refresh-token": "...", "bo-token": "..."}
-        返回失败: {} 或抛出异常
-        """
-        url = f"{BASE_URL}{API_DO_REFRESH_TOKEN}"
-        headers = self._get_headers()
+        """Coalesce overlapping refresh calls, including failed attempts."""
+        attempt = self._refresh_attempt
+        async with self._auth_lock:
+            if attempt != self._refresh_attempt:
+                if self._refresh_error is not None:
+                    raise self._refresh_error("Previous simultaneous refresh failed")
+                return dict(self._refresh_result)
+            return await self._refresh_locked()
 
-        _LOGGER.info("开始刷新Token...")
-
+    async def _refresh_locked(self):
+        """Refresh under the same lock used by all business requests."""
+        self._refresh_attempt += 1
+        self._refresh_error = None
+        self._refresh_result = {}
         try:
-            async with self._session.get(
-                url,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status != 200:
-                    _LOGGER.error(f"刷新Token HTTP错误: {response.status}")
-                    return {}
-
-                data = await response.json()
-
-                _LOGGER.debug(f"刷新Token原始响应: {data}")
-
-                if self._is_session_timeout(data):
-                    self._log_session_dead(
-                        f"Token刷新失败(会话超时): {data.get('msg')}"
-                    )
-                    raise SessionTimeoutError(f"{data.get('msg')}")
-
-                if not data.get("success"):
-                    _LOGGER.error(f"Token刷新失败: {data.get('msg')}")
-                    raise Exception(f"Token刷新失败: {data.get('msg')}")
-
-                result = data.get("dataResult", {})
-                
-                if not isinstance(result, dict):
-                    _LOGGER.warning(f"Token刷新返回非字典: type={type(result).__name__}, val={str(result)[:100]}")
-                    return {}
-
-                new_refresh_token = result.get("refresh-token") or result.get("refreshToken")
-                new_bo_token = result.get("bo-token") or result.get("boToken")
-                new_wx_code = result.get("wxCode") or result.get("wxcode")
-
-                if new_refresh_token and new_bo_token:
-                    self._mark_session_alive()
-                    old_rt = self.refresh_token[:30] if len(self.refresh_token) > 30 else self.refresh_token
-                    self.refresh_token = new_refresh_token
-                    self.bo_token = new_bo_token
-                    if new_wx_code:
-                        self.wx_code = new_wx_code
-
-                    if self._on_token_refresh:
-                        await self._on_token_refresh(new_refresh_token, new_bo_token)
-
-                    _LOGGER.info("Token刷新成功!")
-                    return {"refresh-token": new_refresh_token, "bo-token": new_bo_token}
-                else:
-                    _LOGGER.warning(f"Token刷新缺少字段: keys={list(result.keys()) if isinstance(result, dict) else 'N/A'}")
-                    return {}
-
-        except SessionTimeoutError:
+            try:
+                data = await self._exchange("GET", API_DO_REFRESH_TOKEN)
+            except SessionTimeoutError:
+                self._log_session_dead("Token刷新失败(会话超时)")
+                raise
+            if data.get("success") is not True:
+                raise ApiResponseError("Token refresh unsuccessful")
+            result = data.get("dataResult")
+            if not isinstance(result, dict):
+                raise ApiResponseError("Invalid token refresh response")
+            new_rt = result.get("refresh-token") or result.get("refreshToken")
+            new_bt = result.get("bo-token") or result.get("boToken")
+            new_wx = result.get("wxCode") or result.get("wxcode") or self.wx_code
+            if not all(isinstance(value, str) and value for value in (new_rt, new_bt, new_wx)):
+                raise ApiResponseError("Token refresh response missing credentials")
+            if (new_rt, new_bt, new_wx) != (self.refresh_token, self.bo_token, self.wx_code):
+                self._generation += 1
+            self.refresh_token, self.bo_token, self.wx_code = new_rt, new_bt, new_wx
+            self._mark_session_alive()
+            if self._on_token_refresh:
+                await self._on_token_refresh(new_rt, new_bt, new_wx)
+            self._refresh_result = {"refresh-token": new_rt, "bo-token": new_bt}
+            _LOGGER.info("Token刷新成功")
+            return dict(self._refresh_result)
+        except (SessionTimeoutError, TransportError, ApiResponseError) as exc:
+            self._refresh_error = type(exc)
             raise
-        except Exception as e:
-            _LOGGER.error(f"Token刷新异常: {e}")
-            raise
+        except Exception as exc:
+            self._refresh_error = ApiResponseError
+            raise ApiResponseError("Token refresh or persistence failed") from exc
 
     async def async_get_login_info(self) -> Dict[str, Any]:
         """获取登录信息"""

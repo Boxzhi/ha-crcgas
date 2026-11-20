@@ -358,6 +358,7 @@ SENSOR_TYPES = {
 # 集成状态定义
 INTEGRATION_STATUS = {
     "normal": "正常",
+    "partial_error": "部分接口异常",
     "token_expired": "密钥过期",
     "network_error": "网络异常",
     "config_error": "配置错误",

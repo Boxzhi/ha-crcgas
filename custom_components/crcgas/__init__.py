@@ -42,12 +42,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     bo_token = entry.data.get(CONF_BO_TOKEN, "")
     wx_code = entry.data.get(CONF_WX_CODE, "")
 
-    async def on_token_refresh(new_refresh_token: str, new_bo_token: str):
+    async def on_token_refresh(new_refresh_token: str, new_bo_token: str, new_wx_code: str):
         """Token刷新后持久化到 config_entry"""
         _LOGGER.info("独立定时器: 保存新Token到config_entry")
         new_data = {**entry.data}
         new_data[CONF_REFRESH_TOKEN] = new_refresh_token
         new_data[CONF_BO_TOKEN] = new_bo_token
+        new_data[CONF_WX_CODE] = new_wx_code
         hass.config_entries.async_update_entry(entry, data=new_data)
 
     session = async_get_clientsession(hass)
@@ -85,6 +86,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error(f"独立定时器[紧急]: Token刷新异常: {e}")
 
+    # Complete the first credential attempt before any platform can query.
+    # A transient refresh failure must not prevent using still-valid credentials.
+    await _async_refresh_token_hourly()
+
     cancel_timer_hourly = async_track_time_interval(
         hass,
         _async_refresh_token_hourly,
@@ -98,9 +103,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][f"{entry.entry_id}_token_timer_cancel"] = cancel_timer_hourly
     hass.data[DOMAIN][f"{entry.entry_id}_token_timer_urgent_cancel"] = cancel_timer_urgent
     _LOGGER.info(f"独立Token刷新定时器已启动，整点刷新间隔: {TOKEN_REFRESH_INTERVAL}，紧急检查间隔: 1分钟")
-
-    # 启动后立即执行一次整点刷新
-    hass.async_create_task(_async_refresh_token_hourly())
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True

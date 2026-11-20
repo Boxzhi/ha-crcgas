@@ -28,7 +28,8 @@ except ImportError:
 
 from homeassistant.components.sensor.const import SensorStateClass as _SSC
 
-from .api import HuarunGasApi, SessionTimeoutError
+from .api import HuarunGasApi, SessionTimeoutError, TransportError
+from .health import BalanceSnapshot, integration_status
 from .tiers import TIER_KEYS, parse_tiers, parse_bill_steps, number
 from .payment_storage import PAYMENT_KEYS, PaymentHistory
 from .schedule import RefreshTimer, effective_schedule
@@ -708,7 +709,7 @@ async def async_setup_entry(
 
 
 
-        async def on_token_refresh(new_refresh_token: str, new_bo_token: str):
+        async def on_token_refresh(new_refresh_token: str, new_bo_token: str, new_wx_code: str):
 
             """Token刷新后保存"""
 
@@ -719,6 +720,7 @@ async def async_setup_entry(
             new_data[CONF_REFRESH_TOKEN] = new_refresh_token
 
             new_data[CONF_BO_TOKEN] = new_bo_token
+            new_data[CONF_WX_CODE] = new_wx_code
 
             hass.config_entries.async_update_entry(config_entry, data=new_data)
 
@@ -736,6 +738,7 @@ async def async_setup_entry(
     # ========== 2. 数据更新协调器 ==========
 
     last_valid_tiers = {}
+    balance_snapshot = BalanceSnapshot()
     payment_cache = PaymentHistory(hass, config_entry.entry_id, cons_no)
     await payment_cache.async_load()
     hass.data[DOMAIN][f"{config_entry.entry_id}_payment_cache"] = payment_cache
@@ -812,9 +815,11 @@ async def async_setup_entry(
 
         result.update(last_valid_tiers)
         result["tier_data_status"] = "stale" if last_valid_tiers else "unavailable"
-        session_timeout_count = 0
+        outcomes = {}
 
-        total_api_calls = 6
+        def failure(name, exc):
+            outcomes[name] = ("auth" if isinstance(exc, SessionTimeoutError) else
+                              "network" if isinstance(exc, TransportError) else "api")
 
 
 
@@ -834,56 +839,47 @@ async def async_setup_entry(
 
 
 
-        # 1. 获取欠费信息
-
+        # 1. Query balance; preserve verified values on a transient failure.
+        outcomes["balance"] = "api"
         try:
-
             arrears_data = await api.async_query_arrears(cons_no)
-
-            if arrears_data:
-
-                data = arrears_data.get("dataResult", {})
-
-                if isinstance(data, dict):
-
-                    result["arrears"] = _numeric_value(data.get("totalAmt"))
-
-                    result["account_balance"] = _numeric_value(data.get("totalBal"))
-
+            if balance_snapshot.update(arrears_data):
+                outcomes["balance"] = "ok"
+            else:
+                _LOGGER.warning("欠费或余额响应缺少有效字段，保留上次有效值")
         except Exception as e:
-
-            _LOGGER.error(f"获取欠费信息失败: {e}")
-
-            if "SESSION_TIMEOUT" in str(e) or "会话超时" in str(e):
-
-                session_timeout_count += 1
-
-
+            failure("balance", e)
+            _LOGGER.warning("获取欠费信息失败: %s", type(e).__name__)
+        result.update(balance_snapshot.values)
 
         # 2. 获取缴费历史：所有成功页面构成独立快照，失败保留上次有效数据。
         try:
             await payment_cache.async_refresh(api, cons_no)
+            outcomes["payments"] = "ok"
         except Exception as e:
+            failure("payments", e)
             _LOGGER.warning("缴费历史更新失败，使用有效缓存（%s）", type(e).__name__)
-            if isinstance(e, SessionTimeoutError) or "SESSION_TIMEOUT" in str(e) or "会话超时" in str(e):
-                session_timeout_count += 1
         result.update(payment_cache.sensor_data())
 
         # 3. 获取账单列表（获取抄表日期和阶梯剩余气量）
 
         try:
 
+            outcomes["bills"] = "api"
             bill_data = await api.async_get_gas_bill_list(cons_no, page=1, page_num=6)
 
             if bill_data and bill_data.get("success"):
 
                 data_result = bill_data.get("dataResult", {})
+                if isinstance(data_result, dict) and isinstance(data_result.get("data"), list):
+                    outcomes["bills"] = "ok"
 
                 bills = data_result.get("data", []) if isinstance(data_result, dict) else []
 
                 try:
                     tier_data = parse_tiers(data_result)
                 except ValueError as err:
+                    outcomes["bills"] = "api"
                     _LOGGER.warning("阶梯信息无效，保留上次有效数据: %s", err)
                 else:
                     last_valid_tiers.clear()
@@ -982,11 +978,8 @@ async def async_setup_entry(
 
         except Exception as e:
 
-            _LOGGER.error(f"获取账单列表失败: {e}")
-
-            if "SESSION_TIMEOUT" in str(e) or "会话超时" in str(e):
-
-                session_timeout_count += 1
+            failure("bills", e)
+            _LOGGER.warning("获取账单列表失败: %s", type(e).__name__)
 
 
 
@@ -994,6 +987,7 @@ async def async_setup_entry(
 
         try:
 
+            outcomes["chart"] = "api"
             chart_data = await api.async_get_gas_bill_list4chart(cons_no)
 
             if chart_data and chart_data.get("success"):
@@ -1002,6 +996,8 @@ async def async_setup_entry(
 
                 if isinstance(dr, dict):
 
+                    if isinstance(dr.get("lastGas"), list) and isinstance(dr.get("thisGas"), list):
+                        outcomes["chart"] = "ok"
                     last_gas = dr.get("lastGas", [])
 
                     if len(last_gas) > 1:
@@ -1024,11 +1020,8 @@ async def async_setup_entry(
 
         except Exception as e:
 
-            _LOGGER.error(f"获取月度用气图表失败: {e}")
-
-            if "SESSION_TIMEOUT" in str(e) or "会话超时" in str(e):
-
-                session_timeout_count += 1
+            failure("chart", e)
+            _LOGGER.warning("获取月度用气图表失败: %s", type(e).__name__)
 
 
 
@@ -1042,6 +1035,7 @@ async def async_setup_entry(
 
             if bill_ym and app_no:
 
+                outcomes["detail"] = "api"
                 detail_data = await api.async_get_bill_detail(cons_no, bill_ym, app_no)
 
                 if detail_data and detail_data.get("success"):
@@ -1051,6 +1045,8 @@ async def async_setup_entry(
                     if details and isinstance(details, list):
 
                         detail = details[0]
+                        if isinstance(detail, dict):
+                            outcomes["detail"] = "ok"
 
                         result["this_read"] = number(detail.get("thisRead"))
 
@@ -1085,11 +1081,8 @@ async def async_setup_entry(
 
         except Exception as e:
 
-            _LOGGER.error(f"获取账单详情失败: {e}")
-
-            if "SESSION_TIMEOUT" in str(e) or "会话超时" in str(e):
-
-                session_timeout_count += 1
+            failure("detail", e)
+            _LOGGER.warning("获取账单详情失败: %s", type(e).__name__)
 
             result["this_gas_used"] = result.get("last_bill_gas_amt")
 
@@ -1099,6 +1092,7 @@ async def async_setup_entry(
 
         try:
 
+            outcomes["binding"] = "api"
             binding_data = await api.async_get_binding_cons()
 
             if binding_data and binding_data.get("success"):
@@ -1108,6 +1102,8 @@ async def async_setup_entry(
                 if isinstance(cons_list, list) and cons_list:
 
                     cons_info = cons_list[0]
+                    if isinstance(cons_info, dict):
+                        outcomes["binding"] = "ok"
 
                     result["cons_addr"] = cons_info.get("consAddr", "未知")
 
@@ -1121,33 +1117,13 @@ async def async_setup_entry(
 
         except Exception as e:
 
-            _LOGGER.error(f"获取绑定信息失败: {e}")
+            failure("binding", e)
+            _LOGGER.warning("获取绑定信息失败: %s", type(e).__name__)
 
-            if "SESSION_TIMEOUT" in str(e) or "会话超时" in str(e):
-
-                session_timeout_count += 1
-
-
-
-        if session_timeout_count >= total_api_calls:
-
-            _LOGGER.critical(f"全部{total_api_calls}个API返回会话超时！Token已完全失效。")
-
-            result["integration_status"] = "token_expired"
-
-        else:
-
-            # 简单状态判断
-
-            if session_timeout_count > 0:
-
-                result["integration_status"] = "token_expired"
-
-            else:
-
-                result["integration_status"] = "normal"
-
-
+        result["integration_status"] = integration_status(outcomes, api.session_dead)
+        if result["integration_status"] != "normal":
+            _LOGGER.warning("燃气数据更新状态: %s, 接口结果: %s",
+                            result["integration_status"], outcomes)
 
         # 设置月度累计用气量（暂时用本期用气量代替）
 
