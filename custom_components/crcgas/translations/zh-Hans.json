@@ -4,13 +4,51 @@
     "step": {
       "user": {
         "title": "华润燃气",
-        "description": "请填写从微信小程序抓包获取的 Token 信息",
+        "description": "填写微信小程序抓包取得的 Token，选择更新模式后继续。",
         "data": {
           "refresh_token": "Refresh Token",
           "bo_token": "BO Token",
           "wx_code": "微信 Code",
-          "scan_interval": "数值",
-          "scan_interval_unit": "单位"
+          "mode": "数据更新模式"
+        }
+      },
+      "reconfigure": {
+        "title": "重新配置认证",
+        "description": "仅更新认证信息，更新周期请在配置选项中修改。",
+        "data": {
+          "refresh_token": "Refresh Token",
+          "bo_token": "BO Token",
+          "wx_code": "微信 Code"
+        }
+      },
+      "schedule_hour": {
+        "title": "按小时间隔",
+        "description": "每隔指定小时数更新一次。手动刷新不会改变下次自动更新时间。",
+        "data": {
+          "hours": "更新间隔（小时）"
+        }
+      },
+      "schedule_day": {
+        "title": "每天定时",
+        "description": "按照 Home Assistant 时区，每天在指定时间更新。",
+        "data": {
+          "at": "执行时间"
+        }
+      },
+      "schedule_week": {
+        "title": "每周定时",
+        "description": "按照 Home Assistant 时区，每周在指定星期和时间更新。",
+        "data": {
+          "weekday": "星期",
+          "at": "执行时间"
+        }
+      },
+      "schedule_month": {
+        "title": "每月定时",
+        "description": "若该月没有指定日期，则在当月最后一天的指定时间执行。",
+        "data": {
+          "day": "每月日期",
+          "at": "执行时间"
         }
       }
     },
@@ -18,19 +56,56 @@
       "session_timeout": "会话已超时，请重新抓包获取最新 Token",
       "auth_failed": "Token 验证失败，请检查 Token 是否正确",
       "no_binding": "该账号未绑定户号",
-      "network_error": "网络连接失败，请检查服务器状态"
+      "network_error": "网络连接失败，请检查服务器状态",
+      "invalid_schedule": "请填写有效日期、星期或整分钟时间",
+      "account_changed": "不能通过重新配置切换户号，请使用原账户"
+    },
+    "abort": {
+      "reconfigure_successful": "认证信息已更新"
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "更新设置",
-        "description": "配置数据更新规则",
+        "title": "数据更新设置",
+        "description": "{legacy_notice}",
         "data": {
-          "scan_interval": "数值",
-          "scan_interval_unit": "单位"
+          "mode": "数据更新模式"
+        }
+      },
+      "schedule_hour": {
+        "title": "按小时间隔",
+        "description": "每隔指定小时数更新一次。手动刷新不会改变下次自动更新时间。",
+        "data": {
+          "hours": "更新间隔（小时）"
+        }
+      },
+      "schedule_day": {
+        "title": "每天定时",
+        "description": "按照 Home Assistant 时区，每天在指定时间更新。",
+        "data": {
+          "at": "执行时间"
+        }
+      },
+      "schedule_week": {
+        "title": "每周定时",
+        "description": "按照 Home Assistant 时区，每周在指定星期和时间更新。",
+        "data": {
+          "weekday": "星期",
+          "at": "执行时间"
+        }
+      },
+      "schedule_month": {
+        "title": "每月定时",
+        "description": "若该月没有指定日期，则在当月最后一天的指定时间执行。",
+        "data": {
+          "day": "每月日期",
+          "at": "执行时间"
         }
       }
+    },
+    "error": {
+      "invalid_schedule": "请填写有效日期、星期或整分钟时间"
     }
   }
 }

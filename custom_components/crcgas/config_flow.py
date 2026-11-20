@@ -1,230 +1,158 @@
-"""华润燃气 配置流程 - v1.0.9
-
-修复：
-1. OptionsFlow 500 错误（HA 2024.7+ 不再通过 __init__ 接收 config_entry）
-2. scan_interval 支持四种单位：小时/天/周/月
-3. 输入验证：根据单位限制合理范围
-"""
-
+"""HA-native multi-step configuration and refresh options."""
 import logging
 import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-
+from homeassistant.helpers.selector import (
+    NumberSelector, NumberSelectorConfig, NumberSelectorMode,
+    TimeSelector, TextSelector, TextSelectorConfig, TextSelectorType,
+)
 from .const import (
-    API_GET_BINDING_CONS,
-    BASE_URL,
-    CONF_AREA,
-    CONF_BO_TOKEN,
-    CONF_CONS_ADDR,
-    CONF_CONS_NAME,
-    CONF_CONS_NO,
-    CONF_MOBILE,
-    CONF_REFRESH_TOKEN,
-    CONF_SCAN_INTERVAL,
-    CONF_SCAN_INTERVAL_UNIT,
-    CONF_WX_CODE,
-    DEFAULT_SCAN_INTERVAL,
-    DOMAIN,
-    SCAN_INTERVAL_UNITS,
+    API_GET_BINDING_CONS, BASE_URL, CONF_AREA, CONF_BO_TOKEN,
+    CONF_CONS_ADDR, CONF_CONS_NAME, CONF_CONS_NO, CONF_MOBILE,
+    CONF_REFRESH_TOKEN, CONF_WX_CODE, DOMAIN, SCAN_INTERVAL_UNITS,
+)
+from .schedule import (
+    SCHEDULE_KEY, Schedule, effective_schedule, form_defaults, parse_schedule, serialize,
 )
 
 _LOGGER = logging.getLogger(__name__)
+WEEKDAYS = {1: "星期一", 2: "星期二", 3: "星期三", 4: "星期四", 5: "星期五", 6: "星期六", 7: "星期日"}
+AUTH_KEYS = (CONF_REFRESH_TOKEN, CONF_BO_TOKEN, CONF_WX_CODE)
 
 
-def _build_interval_schema(default_value=1, default_unit="month"):
-    """构建扫描间隔表单 Schema"""
-    return vol.Schema(
-        {
-            vol.Required(
-                CONF_SCAN_INTERVAL,
-                default=default_value,
-            ): vol.All(
-                vol.Coerce(int),
-            ),
-            vol.Required(
-                CONF_SCAN_INTERVAL_UNIT,
-                default=default_unit,
-            ): vol.In(SCAN_INTERVAL_UNITS),
-        }
-    )
+def _auth_schema(defaults=None, mode=None):
+    defaults = defaults or {}
+    fields = {}
+    for key in AUTH_KEYS:
+        marker = vol.Required(key, default=defaults[key]) if key in defaults else vol.Required(key)
+        fields[marker] = TextSelector(TextSelectorConfig(
+            type=TextSelectorType.PASSWORD if key != CONF_WX_CODE else TextSelectorType.TEXT
+        ))
+    if mode is not None:
+        fields[vol.Required("mode", default=mode)] = vol.In(SCAN_INTERVAL_UNITS)
+    return vol.Schema(fields)
 
 
-def _build_user_schema():
-    """构建新增集成的完整表单 Schema（包含 token 字段）"""
-    return vol.Schema(
-        {
-            vol.Required(CONF_REFRESH_TOKEN): str,
-            vol.Required(CONF_BO_TOKEN): str,
-            vol.Required(CONF_WX_CODE): str,
-            vol.Required(
-                CONF_SCAN_INTERVAL,
-                default=1,
-            ): vol.All(vol.Coerce(int)),
-            vol.Required(
-                CONF_SCAN_INTERVAL_UNIT,
-                default="month",
-            ): vol.In(SCAN_INTERVAL_UNITS),
-        }
-    )
+def _mode_schema(mode):
+    return vol.Schema({vol.Required("mode", default=mode): vol.In(SCAN_INTERVAL_UNITS)})
 
 
-def _validate_interval(value, unit):
-    """验证数值是否符合单位要求（定时/间隔语义）"""
-    if unit == "hour":
-        if not 1 <= value <= 24:
-            return "间隔小时数请输入 1-24"
-    elif unit == "day":
-        if not 0 <= value <= 23:
-            return "日模式请输入 0-23（表示每天几点更新，如20表示每天20:00）"
-    elif unit == "week":
-        if not 1 <= value <= 7:
-            return "周模式请输入 1-7（1=周一，7=周日）"
-    elif unit == "month":
-        if not 1 <= value <= 31:
-            return "月模式请输入 1-31（表示每月几号更新）"
-    return None
+def _detail_schema(mode, defaults):
+    fields = {}
+    if mode == "hour":
+        fields[vol.Required("hours", default=defaults.hours)] = NumberSelector(
+            NumberSelectorConfig(min=1, max=24, step=1, mode=NumberSelectorMode.BOX))
+    else:
+        if mode == "week":
+            fields[vol.Required("weekday", default=defaults.weekday)] = vol.In(WEEKDAYS)
+        if mode == "month":
+            fields[vol.Required("day", default=defaults.day)] = NumberSelector(
+                NumberSelectorConfig(min=1, max=31, step=1, mode=NumberSelectorMode.BOX))
+        fields[vol.Required("at", default=defaults.at)] = TimeSelector()
+    return vol.Schema(fields)
 
 
-class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+def _validated_detail(mode, user_input):
+    value = {"mode": mode, **user_input}
+    for key in ("hours", "day", "weekday"):
+        if key in value:
+            original = value[key]
+            converted = int(original)
+            if isinstance(original, bool) or float(original) != converted:
+                raise ValueError("integer required")
+            value[key] = converted
+    return serialize(parse_schedule(value))
+
+
+class ScheduleSteps:
+    """Shared second-step forms; Home Assistant selects schema on Next."""
+    async def _schedule_step(self, mode, user_input):
+        errors = {}
+        if user_input is not None:
+            try:
+                selected = _validated_detail(mode, user_input)
+            except (ValueError, TypeError, OverflowError):
+                errors["base"] = "invalid_schedule"
+            else:
+                return await self._save_schedule(selected)
+        defaults = self._schedule_defaults
+        if defaults.mode != mode:
+            defaults = Schedule(mode)
+        return self.async_show_form(
+            step_id=f"schedule_{mode}",
+            data_schema=self.add_suggested_values_to_schema(_detail_schema(mode, defaults), user_input or {}),
+            errors=errors,
+        )
+
+    async def async_step_schedule_hour(self, user_input=None):
+        return await self._schedule_step("hour", user_input)
+
+    async def async_step_schedule_day(self, user_input=None):
+        return await self._schedule_step("day", user_input)
+
+    async def async_step_schedule_week(self, user_input=None):
+        return await self._schedule_step("week", user_input)
+
+    async def async_step_schedule_month(self, user_input=None):
+        return await self._schedule_step("month", user_input)
+
+
+class ConfigFlow(ScheduleSteps, config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
     MINOR_VERSION = 2
 
+    async def _credentials(self, user_input):
+        credentials = {key: user_input[key].strip() for key in AUTH_KEYS}
+        if not all(credentials.values()):
+            return None, "auth_failed"
+        result = await self._validate_and_get_cons(
+            credentials[CONF_REFRESH_TOKEN], credentials[CONF_BO_TOKEN], credentials[CONF_WX_CODE])
+        if not result.get("success"):
+            return None, result.get("error", "auth_failed")
+        info = result["cons_info"]
+        return {
+            **credentials, CONF_CONS_NO: info.get("consNo", ""),
+            CONF_CONS_NAME: info.get("consName", ""), CONF_CONS_ADDR: info.get("consAddr", ""),
+            CONF_MOBILE: info.get("mobile", ""), CONF_AREA: info.get("area", ""),
+        }, None
+
     async def async_step_user(self, user_input=None):
-        """初始配置步骤"""
         errors = {}
         if user_input is not None:
-            refresh_token = user_input[CONF_REFRESH_TOKEN]
-            bo_token = user_input[CONF_BO_TOKEN]
-            wx_code = user_input[CONF_WX_CODE]
-
-            # 验证扫描间隔
-            interval_val = user_input.get(CONF_SCAN_INTERVAL, 1)
-            interval_unit = user_input.get(CONF_SCAN_INTERVAL_UNIT, "month")
-            validation_error = _validate_interval(interval_val, interval_unit)
-            if validation_error:
-                errors[CONF_SCAN_INTERVAL] = validation_error
-            else:
-                try:
-                    result = await self._validate_and_get_cons(refresh_token, bo_token, wx_code)
-                    if result.get("success"):
-                        cons_info = result["cons_info"]
-                        final_data = {
-                            CONF_REFRESH_TOKEN: refresh_token,
-                            CONF_BO_TOKEN: bo_token,
-                            CONF_WX_CODE: wx_code,
-                            CONF_CONS_NO: cons_info.get("consNo", ""),
-                            CONF_CONS_NAME: cons_info.get("consName", ""),
-                            CONF_CONS_ADDR: cons_info.get("consAddr", ""),
-                            CONF_MOBILE: cons_info.get("mobile", ""),
-                            CONF_AREA: cons_info.get("area", ""),
-                            CONF_SCAN_INTERVAL: int(interval_val),
-                            CONF_SCAN_INTERVAL_UNIT: interval_unit,
-                        }
-                        return self.async_create_entry(
-                            title=f"华润燃气 ({cons_info.get('consNo', '未知户号')})",
-                            data=final_data,
-                        )
-                    else:
-                        err_key = result.get("error", "auth_failed")
-                        error_msgs = {
-                            "auth_failed": "Token验证失败，请检查是否过期",
-                            "no_binding": "未找到绑定户号",
-                            "session_timeout": "会话已超时，请重新获取Token",
-                            "network_error": "无法连接到华润燃气服务器",
-                        }
-                        errors["base"] = error_msgs.get(err_key, "验证失败")
-                except Exception as e:
-                    _LOGGER.exception(f"验证 tokens 异常: {e}")
-                    errors["base"] = "unknown_error"
-
+            self._pending_data, error = await self._credentials(user_input)
+            if error is None:
+                mode = user_input["mode"]
+                self._schedule_defaults = Schedule(mode)
+                return await self._schedule_step(mode, None)
+            errors["base"] = error
         return self.async_show_form(
-            step_id="user",
-            data_schema=_build_user_schema(),
-            errors=errors,
+            step_id="user", data_schema=_auth_schema(mode="hour"), errors=errors,
+        )
+
+    async def _save_schedule(self, selected):
+        data = {**self._pending_data, SCHEDULE_KEY: selected}
+        return self.async_create_entry(
+            title=f"华润燃气 ({data.get(CONF_CONS_NO, '未知户号')})", data=data,
         )
 
     async def async_step_reconfigure(self, user_input=None):
-        """重新配置步骤"""
-        reconfigure_entry = self._get_reconfigure_entry()
-        if reconfigure_entry is None:
-            return self.async_abort(reason="cannot_reconfigure")
-
+        entry = self._get_reconfigure_entry()
         errors = {}
-
         if user_input is not None:
-            refresh_token = user_input[CONF_REFRESH_TOKEN]
-            bo_token = user_input[CONF_BO_TOKEN]
-            wx_code = user_input[CONF_WX_CODE]
-
-            # 验证扫描间隔
-            interval_val = user_input.get(CONF_SCAN_INTERVAL, 1)
-            interval_unit = user_input.get(CONF_SCAN_INTERVAL_UNIT, "month")
-            validation_error = _validate_interval(interval_val, interval_unit)
-            if validation_error:
-                errors[CONF_SCAN_INTERVAL] = validation_error
+            data, error = await self._credentials(user_input)
+            if error is None:
+                if data[CONF_CONS_NO] != entry.data.get(CONF_CONS_NO):
+                    errors["base"] = "account_changed"
+                else:
+                    return self.async_update_reload_and_abort(entry, data_updates=data)
             else:
-                try:
-                    result = await self._validate_and_get_cons(refresh_token, bo_token, wx_code)
-                    if result.get("success"):
-                        cons_info = result["cons_info"]
-                        final_data = {
-                            CONF_REFRESH_TOKEN: refresh_token,
-                            CONF_BO_TOKEN: bo_token,
-                            CONF_WX_CODE: wx_code,
-                            CONF_CONS_NO: cons_info.get("consNo", ""),
-                            CONF_CONS_NAME: cons_info.get("consName", ""),
-                            CONF_CONS_ADDR: cons_info.get("consAddr", ""),
-                            CONF_MOBILE: cons_info.get("mobile", ""),
-                            CONF_AREA: cons_info.get("area", ""),
-                            CONF_SCAN_INTERVAL: int(interval_val),
-                            CONF_SCAN_INTERVAL_UNIT: interval_unit,
-                        }
-                        return self.async_update_reload_and_abort(
-                            reconfigure_entry,
-                            data_updates=final_data,
-                        )
-                    else:
-                        errors["base"] = result.get("error", "auth_failed")
-                except Exception as e:
-                    _LOGGER.exception(f"重新配置异常: {e}")
-                    errors["base"] = "unknown_error"
-
-        # 读取当前值
-        current_val = reconfigure_entry.data.get(CONF_SCAN_INTERVAL, 1)
-        current_unit = reconfigure_entry.data.get(CONF_SCAN_INTERVAL_UNIT, "month")
-
-        reconfigure_schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_REFRESH_TOKEN,
-                    default=reconfigure_entry.data.get(CONF_REFRESH_TOKEN, "")
-                ): str,
-                vol.Required(
-                    CONF_BO_TOKEN,
-                    default=reconfigure_entry.data.get(CONF_BO_TOKEN, "")
-                ): str,
-                vol.Required(
-                    CONF_WX_CODE,
-                    default=reconfigure_entry.data.get(CONF_WX_CODE, "")
-                ): str,
-                vol.Required(
-                    CONF_SCAN_INTERVAL,
-                    default=current_val,
-                ): vol.All(vol.Coerce(int), vol.Range(min=1)),
-                vol.Required(
-                    CONF_SCAN_INTERVAL_UNIT,
-                    default=current_unit,
-                ): vol.In(SCAN_INTERVAL_UNITS),
-            }
-        )
-
+                errors["base"] = error
+        # Credential reconfiguration must not silently overwrite schedule options.
         return self.async_show_form(
-            step_id="reconfigure",
-            data_schema=reconfigure_schema,
-            errors=errors,
+            step_id="reconfigure", data_schema=_auth_schema(entry.data), errors=errors,
         )
 
     async def _validate_and_get_cons(self, refresh_token, bo_token, wx_code):
@@ -267,7 +195,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     if isinstance(cons_list, list) and cons_list:
                         return {"success": True, "cons_info": cons_list[0]}
                     else:
-                        _LOGGER.info(f"无绑定户号: {data}")
+                        _LOGGER.info("无绑定户号")
                         return {"success": False, "error": "no_binding"}
                 else:
                     _LOGGER.warning(f"Token验证失败: success={data.get('success')}, msg={msg}, statusCode={status_code}")
@@ -280,42 +208,27 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             _LOGGER.exception(f"验证请求异常: {type(e).__name__}: {e}")
             return {"success": False, "error": "network_error"}
 
+
     @staticmethod
     @callback
     def async_get_options_flow(config_entry):
-        """返回选项配置流程"""
         return OptionsFlowHandler()
 
 
-class OptionsFlowHandler(config_entries.OptionsFlow):
-    """选项配置流程 - 修改扫描间隔"""
-
+class OptionsFlowHandler(ScheduleSteps, config_entries.OptionsFlow):
     async def async_step_init(self, user_input=None):
-        """扫描间隔设置步骤"""
+        self._schedule_defaults = form_defaults(self.config_entry.data, self.config_entry.options)
         if user_input is not None:
-            # 验证输入
-            interval_val = user_input.get(CONF_SCAN_INTERVAL, 1)
-            interval_unit = user_input.get(CONF_SCAN_INTERVAL_UNIT, "hour")
-            error = _validate_interval(interval_val, interval_unit)
-            if error:
-                return self.async_show_form(
-                    step_id="init",
-                    data_schema=_build_interval_schema(interval_val, interval_unit),
-                    errors={CONF_SCAN_INTERVAL: error},
-                )
-            return self.async_create_entry(title="", data=user_input)
-
-        # 读取当前值（优先 options，其次 data）
-        current_val = self.config_entry.options.get(
-            CONF_SCAN_INTERVAL,
-            self.config_entry.data.get(CONF_SCAN_INTERVAL, 1)
-        )
-        current_unit = self.config_entry.options.get(
-            CONF_SCAN_INTERVAL_UNIT,
-            self.config_entry.data.get(CONF_SCAN_INTERVAL_UNIT, "hour")
-        )
-
+            return await self._schedule_step(user_input["mode"], None)
+        current = effective_schedule(self.config_entry.data, self.config_entry.options)
+        description = "旧版实际轮询周期仍保留，保存新设置后切换为日历定时。" if current.legacy_seconds else "选择更新模式，下一步配置具体时间。"
         return self.async_show_form(
-            step_id="init",
-            data_schema=_build_interval_schema(current_val, current_unit),
+            step_id="init", data_schema=_mode_schema(self._schedule_defaults.mode),
+            description_placeholders={"legacy_notice": description},
         )
+
+    async def _save_schedule(self, selected):
+        options = {**self.config_entry.options, SCHEDULE_KEY: selected}
+        options.pop("scan_interval", None)
+        options.pop("scan_interval_unit", None)
+        return self.async_create_entry(title="", data=options)

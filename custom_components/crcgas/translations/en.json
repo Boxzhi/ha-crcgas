@@ -1,0 +1,111 @@
+{
+  "title": "CRC Gas",
+  "config": {
+    "step": {
+      "user": {
+        "title": "CRC Gas",
+        "description": "Enter the captured credentials, then choose a refresh mode.",
+        "data": {
+          "refresh_token": "Refresh Token",
+          "bo_token": "BO Token",
+          "wx_code": "WeChat Code",
+          "mode": "Refresh mode"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure credentials",
+        "description": "Change credentials only; use options to change the schedule.",
+        "data": {
+          "refresh_token": "Refresh Token",
+          "bo_token": "BO Token",
+          "wx_code": "WeChat Code"
+        }
+      },
+      "schedule_hour": {
+        "title": "Hourly interval",
+        "description": "Refresh every N hours. Manual refresh does not reset the timer.",
+        "data": {
+          "hours": "Interval (hours)"
+        }
+      },
+      "schedule_day": {
+        "title": "Daily schedule",
+        "description": "Uses the Home Assistant time zone.",
+        "data": {
+          "at": "Time"
+        }
+      },
+      "schedule_week": {
+        "title": "Weekly schedule",
+        "description": "Uses the Home Assistant time zone.",
+        "data": {
+          "weekday": "Weekday (1 = Monday)",
+          "at": "Time"
+        }
+      },
+      "schedule_month": {
+        "title": "Monthly schedule",
+        "description": "If the chosen day is absent, use the last day of that month.",
+        "data": {
+          "day": "Day of month",
+          "at": "Time"
+        }
+      }
+    },
+    "error": {
+      "session_timeout": "Session expired",
+      "auth_failed": "Authentication failed",
+      "no_binding": "No linked account",
+      "network_error": "Connection failed",
+      "invalid_schedule": "Invalid date, weekday or time",
+      "account_changed": "Use the original gas account"
+    },
+    "abort": {
+      "reconfigure_successful": "Credentials updated"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Refresh settings",
+        "description": "{legacy_notice}",
+        "data": {
+          "mode": "Refresh mode"
+        }
+      },
+      "schedule_hour": {
+        "title": "Hourly interval",
+        "description": "Refresh every N hours. Manual refresh does not reset the timer.",
+        "data": {
+          "hours": "Interval (hours)"
+        }
+      },
+      "schedule_day": {
+        "title": "Daily schedule",
+        "description": "Uses the Home Assistant time zone.",
+        "data": {
+          "at": "Time"
+        }
+      },
+      "schedule_week": {
+        "title": "Weekly schedule",
+        "description": "Uses the Home Assistant time zone.",
+        "data": {
+          "weekday": "Weekday (1 = Monday)",
+          "at": "Time"
+        }
+      },
+      "schedule_month": {
+        "title": "Monthly schedule",
+        "description": "If the chosen day is absent, use the last day of that month.",
+        "data": {
+          "day": "Day of month",
+          "at": "Time"
+        }
+      }
+    },
+    "error": {
+      "invalid_schedule": "Invalid date, weekday or time"
+    }
+  }
+}

@@ -4,6 +4,7 @@
 保持上次有效值, 历史数据注入(HA统计+SQLite), 燃气累计用量传感器
 """
 
+import asyncio
 import json
 import logging
 from math import isfinite
@@ -16,7 +17,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.event import async_call_later, async_track_point_in_utc_time
+from homeassistant.util import dt as dt_util
 from homeassistant.helpers import entity_registry as er
 
 try:
@@ -29,6 +31,7 @@ from homeassistant.components.sensor.const import SensorStateClass as _SSC
 from .api import HuarunGasApi, SessionTimeoutError
 from .tiers import TIER_KEYS, parse_tiers, parse_bill_steps, number
 from .payment_storage import PAYMENT_KEYS, PaymentHistory
+from .schedule import RefreshTimer, effective_schedule
 from .const import (
     CONF_BO_TOKEN,
     CONF_CONS_NO,
@@ -727,49 +730,8 @@ async def async_setup_entry(
 
 
 
-    # 获取配置的扫描间隔，默认1小时
-
-    # 优先读取 options（用户通过选项流程修改），其次 data（初始配置）
-
-    scan_interval_val = config_entry.options.get(CONF_SCAN_INTERVAL, config_entry.data.get(CONF_SCAN_INTERVAL, 1))
-
-    scan_interval_unit = config_entry.options.get(CONF_SCAN_INTERVAL_UNIT, config_entry.data.get(CONF_SCAN_INTERVAL_UNIT, "hour"))
-
-
-
-    # 计算实际刷新间隔（hour=小时数，day=固定1小时仅支持定时，week=固定1小时，month=固定1小时）
-
-    # day/week/month 模式下实际刷新由 coordinator 内部逻辑决定，这里统一设为1小时兜底
-
-    if scan_interval_unit == "hour":
-
-        scan_interval = timedelta(hours=scan_interval_val)
-
-    elif scan_interval_unit == "day":
-
-        # 每天模式：每 N 天抓一次（按天级周期轮询，至少1天）
-
-        scan_interval = timedelta(days=max(1, int(scan_interval_val)))
-
-    elif scan_interval_unit == "week":
-
-        # 每周模式：每 N 周抓一次
-
-        scan_interval = timedelta(weeks=max(1, int(scan_interval_val)))
-
-    elif scan_interval_unit == "month":
-
-        # 每月模式：按 30 天近似为一个月周期
-
-        scan_interval = timedelta(days=30 * max(1, int(scan_interval_val)))
-
-    else:
-
-        scan_interval = timedelta(hours=1)
-
-    _LOGGER.info(f"数据刷新间隔: {scan_interval_val} {scan_interval_unit}（实际: {scan_interval}）")
-
-
+    # Explicit schedule owns the refresh timer, separate from manual refreshes.
+    spec = effective_schedule(config_entry.data, config_entry.options)
 
     # ========== 2. 数据更新协调器 ==========
 
@@ -1235,6 +1197,12 @@ async def async_setup_entry(
 
 
 
+    update_lock = asyncio.Lock()
+
+    async def async_locked_update():
+        async with update_lock:
+            return await async_update_data()
+
     coordinator = DataUpdateCoordinator(
 
         hass,
@@ -1244,13 +1212,35 @@ async def async_setup_entry(
         name=DOMAIN,
         config_entry=config_entry,
 
-        update_method=async_update_data,
+        update_method=async_locked_update,
 
-        update_interval=scan_interval,
+        update_interval=None,
 
     )
 
 
+
+    async def scheduled_refresh():
+        try:
+            await coordinator.async_request_refresh()
+        except Exception:
+            _LOGGER.exception("定时数据更新失败")
+
+    def arm_refresh(due, action):
+        _LOGGER.debug("下次燃气数据更新: %s", due)
+        return async_track_point_in_utc_time(hass, action, due)
+
+    timer = RefreshTimer(
+        spec, dt_util.utcnow, lambda: dt_util.get_time_zone(hass.config.time_zone),
+        arm_refresh, scheduled_refresh,
+    )
+
+    async def schedule_changed(_hass, entry):
+        # Token persistence also fires update listeners; identical schedule is a no-op.
+        timer.configure(effective_schedule(entry.data, entry.options))
+
+    config_entry.async_on_unload(timer.stop)
+    config_entry.async_on_unload(config_entry.add_update_listener(schedule_changed))
 
     # 立即存储 coordinator 和 api（供 button.py 使用）
 
@@ -1360,6 +1350,9 @@ async def async_setup_entry(
             _LOGGER.error(f"首次传感器数据刷新失败: {e}")
 
             return
+        finally:
+            if not asyncio.current_task().cancelling():
+                timer.start()
 
         # 修正短期统计 sum 冷启动问题（立即执行，可能无记录）
         try:
@@ -1372,7 +1365,7 @@ async def async_setup_entry(
             _LOGGER.info("延时修正短期统计 sum（recorder 编译后）...")
             await hass.async_add_executor_job(_fix_statis_sum)
 
-        async_call_later(hass, timedelta(seconds=300), _fix_statis_deferred)
+        config_entry.async_on_unload(async_call_later(hass, timedelta(seconds=300), _fix_statis_deferred))
 
 
 
@@ -1443,7 +1436,8 @@ async def async_setup_entry(
 
 
 
-    hass.async_create_task(async_initial_setup())
+    initial_task = hass.async_create_task(async_initial_setup())
+    config_entry.async_on_unload(initial_task.cancel)
 
     
 

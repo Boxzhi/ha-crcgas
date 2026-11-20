@@ -24,8 +24,8 @@ jobs:
           }
           $in = $false; $body = @()
           foreach ($line in Get-Content $file) {
-            if ($line -match "^## \[$tag\]") { $in = $true; continue }
-            if ($in -and $line -match "^## \[") { break }
+            if ($line -match "^## (\[$tag\]|$tag)(\s|$)") { $in = $true; continue }
+            if ($in -and $line -match "^## ") { break }
             if ($in) { $body += $line }
           }
           ($body -join "`n").Trim() | Set-Content release_body.txt

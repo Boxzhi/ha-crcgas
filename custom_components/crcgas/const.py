@@ -36,10 +36,10 @@ CONF_MOBILE = "mobile"
 CONF_SCAN_INTERVAL = "scan_interval"
 CONF_SCAN_INTERVAL_UNIT = "scan_interval_unit"
 SCAN_INTERVAL_UNITS = {
-    "hour": "小时（每N小时）",
-    "day": "天（每天X点）",
-    "week": "周（每周X，1=周一）",
-    "month": "月（每月X号）",
+    "hour": "按小时间隔",
+    "day": "每天定时",
+    "week": "每周定时",
+    "month": "每月定时",
 }
 
 # 传感器类型 - 更新版
