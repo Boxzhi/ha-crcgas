@@ -311,6 +311,15 @@ SENSOR_TYPES = {
         "device_class": "monetary",
         "state_class": "total",
     },
+    "tier_data_status": {
+        "name": "阶梯数据状态",
+        "icon": "mdi:database-check",
+    },
+    "annual_gas_used": {
+        "name": "本年累计用气量",
+        "unit": "m³",
+        "icon": "mdi:sigma",
+    },
     "step1_gas_limit": {
         "name": "一档总限额",
         "unit": "m³",

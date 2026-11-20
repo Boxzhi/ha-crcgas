@@ -26,6 +26,7 @@ except ImportError:
 from homeassistant.components.sensor.const import SensorStateClass as _SSC
 
 from .api import HuarunGasApi, SessionTimeoutError
+from .tiers import TIER_KEYS, parse_tiers, parse_bill_steps, number
 from .const import (
     CONF_BO_TOKEN,
     CONF_CONS_NO,
@@ -87,6 +88,7 @@ _STATE_CLASS_MAP = {
     "step3_remain": _SSC.MEASUREMENT,
     "this_gas_used": _SSC.TOTAL,
     "year_avg_gas": _SSC.TOTAL,
+    "annual_gas_used": _SSC.TOTAL,
 
 }
 
@@ -145,6 +147,14 @@ class HuarunGasSensor(BaseSensor):
                 return self._last_good_value
             return None
 
+        if self.sensor_type == "tier_data_status":
+            return data.get("tier_data_status", "unavailable")
+        if self.sensor_type in TIER_KEYS or self.sensor_type in (
+            "step1_gas_used", "step2_gas_used", "step3_gas_used",
+            "annual_gas_used", "estimated_gas_bill_amount",
+        ):
+            return number(data.get(self.sensor_type))
+
         if self.sensor_type == "arrears":
             v = data.get("arrears")
             return float(v) if v is not None else 0.0
@@ -193,18 +203,6 @@ class HuarunGasSensor(BaseSensor):
             v = data.get("this_read_time")
             return v if v and v != "未知" else "未知"
 
-        elif self.sensor_type == "step1_gas_used":
-            v = data.get("step1_gas_used")
-            return float(v) if v is not None else 0.0
-
-        elif self.sensor_type == "step2_gas_used":
-            v = data.get("step2_gas_used")
-            return float(v) if v is not None else 0.0
-
-        elif self.sensor_type == "step3_gas_used":
-            v = data.get("step3_gas_used")
-            return float(v) if v is not None else 0.0
-
         elif self.sensor_type == "this_gas_used":
             v = data.get("this_gas_used")
             return float(v) if v is not None else 0.0
@@ -212,30 +210,6 @@ class HuarunGasSensor(BaseSensor):
         elif self.sensor_type == "bill_amount":
             v = data.get("bill_amount")
             return float(v) if v is not None else 0.0
-
-        elif self.sensor_type == "step1_remain":
-            v = data.get("step1_remain")
-            return float(v) if v is not None else 0.0
-
-        elif self.sensor_type == "step2_remain":
-            v = data.get("step2_remain")
-            return float(v) if v is not None else 0.0
-
-        elif self.sensor_type == "step3_remain":
-            v = data.get("step3_remain")
-            return float(v) if v is not None else 0.0
-
-        elif self.sensor_type == "step1_gas_limit":
-            v = data.get("step1_gas_limit")
-            return float(v) if v is not None else 330.0
-
-        elif self.sensor_type == "step1_gas_sum":
-            v = data.get("step1_gas_sum")
-            return float(v) if v is not None else 0.0
-
-        elif self.sensor_type == "step2_gas_limit":
-            v = data.get("step2_gas_limit")
-            return float(v) if v is not None else 170.0
 
         elif self.sensor_type == "penalty_amount":
             v = data.get("penalty_amount")
@@ -293,34 +267,6 @@ class HuarunGasSensor(BaseSensor):
                 self._last_good_value = val
                 return val
             return self._last_good_value if self._last_good_value is not None else 0.0
-
-        elif self.sensor_type == "gas_price_step1":
-            v = data.get("gas_price_step1")
-            return float(v) if v is not None else 0.0
-
-        elif self.sensor_type == "gas_price_step2":
-            v = data.get("gas_price_step2")
-            return float(v) if v is not None else 0.0
-
-        elif self.sensor_type == "gas_price_step3":
-            v = data.get("gas_price_step3")
-            return float(v) if v is not None else 0.0
-
-        elif self.sensor_type == "step2_gas_sum":
-            v = data.get("step2_gas_sum")
-            return float(v) if v is not None else 0.0
-
-        elif self.sensor_type == "step3_gas_sum":
-            v = data.get("step3_gas_sum")
-            return float(v) if v is not None else 0.0
-
-        elif self.sensor_type == "step3_gas_limit":
-            v = data.get("step3_gas_limit")
-            return float(v) if v is not None else 0.0
-
-        elif self.sensor_type == "estimated_gas_bill_amount":
-            v = data.get("estimated_gas_bill_amount")
-            return float(v) if v is not None else 0.0
 
         elif self.sensor_type == "cons_name":
             v = data.get("cons_name")
@@ -411,50 +357,6 @@ class HuarunGasMeterHistorySensor(BaseSensor):
         )
         if self._coordinator.data is not None:
             self.async_write_ha_state()
-
-async def _calculate_step_usage(result, api, cons_no):
-
-    """计算阶梯用气量（备用方案）- 使用本月用气量"""
-
-    try:
-
-        this_gas_used = result.get("this_gas_used", 0)
-
-        step1_remain = result.get("step1_remain", 0)
-
-        step2_remain = result.get("step2_remain", 0)
-
-        step1_gas_limit = result.get("step1_gas_limit", 330)
-
-        step2_gas_limit = result.get("step2_gas_limit", 170)
-
-        
-
-        if step1_remain > 0:
-
-            # 所有用气量都在第一档
-
-            result["step1_gas_used"] = this_gas_used
-
-            result["step2_gas_used"] = 0
-
-        else:
-
-            # 部分用气量进入第二档
-
-            result["step1_gas_used"] = min(this_gas_used, step1_gas_limit)
-
-            result["step2_gas_used"] = max(0, this_gas_used - step1_gas_limit)
-
-        
-
-        _LOGGER.info(f"计算本月阶梯用气量: 本期={this_gas_used}, 一档={result['step1_gas_used']}, 二档={result['step2_gas_used']}")
-
-    except Exception as e:
-
-        _LOGGER.error(f"计算阶梯用气量失败: {e}")
-
-
 
 def _import_history_statistics(hass, entry, bill_history, current_reading=None):
     """将历史账单数据导入 HA 统计系统，形成趋势图（增量：从DB已有累计值继续）"""
@@ -854,6 +756,8 @@ async def async_setup_entry(
 
     # ========== 2. 数据更新协调器 ==========
 
+    last_valid_tiers = {}
+
     async def async_update_data():
 
         """
@@ -878,18 +782,18 @@ async def async_setup_entry(
 
             "this_read_time": "未知",
 
-            "step1_gas_used": 0,
+            "step1_gas_used": None,
 
-            "step2_gas_used": 0,
+            "step2_gas_used": None,
 
             "this_gas_used": 0,
 
             "bill_amount": 0,
 
-            "step1_remain": 0,
+            "step1_remain": None,
 
-            "step2_remain": 0,
-            "step3_remain": 0,
+            "step2_remain": None,
+            "step3_remain": None,
 
             "penalty_amount": 0,
             "last_read": 0,
@@ -924,6 +828,8 @@ async def async_setup_entry(
 
         }
 
+        result.update(last_valid_tiers)
+        result["tier_data_status"] = "stale" if last_valid_tiers else "unavailable"
         session_timeout_count = 0
 
         total_api_calls = 6
@@ -1016,47 +922,17 @@ async def async_setup_entry(
 
                 bills = data_result.get("data", []) if isinstance(data_result, dict) else []
 
-                cons_prc_info = data_result.get("consPrcInfo", {}) if isinstance(data_result, dict) else {}
-
-                prc_detail_list = cons_prc_info.get("consPrcDetailList", [])
-
-                for prc_detail in prc_detail_list:
-
-                    rule_code = prc_detail.get("ruleCode", "")
-
-                    lev_gq_remain = prc_detail.get("levGqRemain", "")
-                    lev_gq_sum = prc_detail.get("levGqSum", "0")
-
-                    if isinstance(lev_gq_remain, str):
-                        lev_gq_remain = lev_gq_remain.replace(",", "")
-
-                    if rule_code == "0201":
-
-                        result["step1_remain"] = _safe_float(lev_gq_remain) if lev_gq_remain else 0
-
-                        result["step1_gas_limit"] = _safe_float(prc_detail.get("levGq", 0))
-
-                        result["step1_price"] = _safe_float(prc_detail.get("catPrc", 0))
-
-                        result["gas_price_step1"] = _safe_float(prc_detail.get("catPrc", 0))
-
-                    elif rule_code == "0202":
-
-                        result["step2_remain"] = _safe_float(lev_gq_remain) if lev_gq_remain else 0
-
-                        result["step2_gas_limit"] = _safe_float(prc_detail.get("levGq", 0))
-
-                        result["step2_price"] = _safe_float(prc_detail.get("catPrc", 0))
-
-                        result["gas_price_step2"] = _safe_float(prc_detail.get("catPrc", 0))
-                        result["step2_gas_sum"] = _safe_float(lev_gq_sum) if lev_gq_sum else 0
-
-                    elif rule_code == "0203":
-
-                        result["gas_price_step3"] = _safe_float(prc_detail.get("catPrc", 0))
-                        result["step3_remain"] = _safe_float(lev_gq_remain) if lev_gq_remain else 0
-                        result["step3_gas_limit"] = _safe_float(prc_detail.get("levGq", 0))
-                        result["step3_gas_sum"] = _safe_float(lev_gq_sum) if lev_gq_sum else 0
+                try:
+                    tier_data = parse_tiers(data_result)
+                except ValueError as err:
+                    _LOGGER.warning("阶梯信息无效，保留上次有效数据: %s", err)
+                else:
+                    last_valid_tiers.clear()
+                    last_valid_tiers.update(tier_data)
+                    for key in TIER_KEYS:
+                        result.pop(key, None)
+                    result.update(tier_data)
+                    result["tier_data_status"] = "fresh"
 
                 if bills:
 
@@ -1182,9 +1058,9 @@ async def async_setup_entry(
                     this_gas = dr.get("thisGas", [])
                     valid_this = [g for g in this_gas if g is not None and g > 0]
                     if valid_this:
-                        result["step1_gas_sum"] = sum(valid_this)
+                        result["annual_gas_used"] = sum(valid_this)
                     else:
-                        result["step1_gas_sum"] = 0
+                        result["annual_gas_used"] = 0
 
         except Exception as e:
 
@@ -1230,34 +1106,9 @@ async def async_setup_entry(
 
                         result["penalty_amount"] = detail.get("penaltyAmount", 0)
 
-                        step_list = detail.get("gasStepList", [])
-
-                        if step_list:
-
-                            for step in step_list:
-
-                                step_type = step.get("stepType", "")
-
-                                gas_used = step.get("gasUsed", 0)
-
-                                if "一阶" in step_type:
-
-                                    result["step1_gas_used"] = gas_used
-
-                                elif "二阶" in step_type:
-
-                                    result["step2_gas_used"] = gas_used
-
-                                elif "三阶" in step_type:
-
-                                    result["step3_gas_used"] = gas_used
-
-                        else:
-
-                            _LOGGER.info("gasStepList为空，尝试计算阶梯用气量")
-
-                            await _calculate_step_usage(result, api, cons_no)
-
+                        result.update(parse_bill_steps(
+                            detail.get("gasStepList"), result["this_gas_used"]
+                        ))
                     else:
 
                         result["this_gas_used"] = result.get("last_bill_gas_amt", 0)
@@ -1344,75 +1195,22 @@ async def async_setup_entry(
 
 
 
-        # 修复阶梯用气量逻辑：如果一档剩余量>0，二档用气量必须为0
+        # 最新账单与当前阶梯周期可能不同，不用当前余量覆盖历史账单明细。
+        for tier in (1, 2, 3):
+            key = f"gas_price_step{tier}"
+            if result.get(key) is None:
+                result[key] = result.get(f"_bill_price_step{tier}")
 
-        step1_remain = result.get("step1_remain", 0)
-
-        step2_remain = result.get("step2_remain", 0)
-
-        this_gas_used = result.get("this_gas_used", 0)
-
-        step1_gas_limit = result.get("step1_gas_limit", 330)  # 默认值
-
-        step2_gas_limit = result.get("step2_gas_limit", 170)  # 默认值
-
-
-
-        # 如果gasStepList为空或数据异常，重新计算本月阶梯用气量
-
-        if result.get("step1_gas_used", 0) == 0 and result.get("step2_gas_used", 0) == 0:
-
-            if step1_remain > 0:
-
-                # 所有用气量都在第一档
-
-                result["step1_gas_used"] = this_gas_used
-
-                result["step2_gas_used"] = 0
-
-            else:
-
-                # 部分用气量进入第二档
-
-                result["step1_gas_used"] = min(this_gas_used, step1_gas_limit)
-
-                result["step2_gas_used"] = max(0, this_gas_used - step1_gas_limit)
-
+        # 所有实际发生的阶梯都有有效单价时才计算费用（含第三阶梯）。
+        usages = [number(result.get(f"step{i}_gas_used")) for i in (1, 2, 3)]
+        prices = [number(result.get(f"gas_price_step{i}")) for i in (1, 2, 3)]
+        if all(u is not None and (u == 0 or (p is not None and p > 0))
+               for u, p in zip(usages, prices)):
+            result["estimated_gas_bill_amount"] = round(
+                sum(u * (p or 0) for u, p in zip(usages, prices)), 2
+            )
         else:
-
-            # 如果已有阶梯用气量数据，确保逻辑一致性
-
-            if step1_remain > 0 and result["step2_gas_used"] != 0:
-
-                _LOGGER.warning(f"数据不一致：一档剩余量={step1_remain}>0，但二档用气量={result['step2_gas_used']}，强制设为0")
-
-                result["step2_gas_used"] = 0
-
-                # 调整一档用气量，确保总和等于本期用气量
-
-                result["step1_gas_used"] = this_gas_used
-
-
-
-        # 计算预估燃气账单（基于阶梯用气量和气价）
-
-        step1_gas = result.get("step1_gas_used", 0)
-
-        step2_gas = result.get("step2_gas_used", 0)
-
-        price_step1 = result.get("gas_price_step1", 0)
-
-        price_step2 = result.get("gas_price_step2", 0)
-
-        if step1_gas + step2_gas > 0 and price_step1 > 0:
-
-            estimated_water = step1_gas * price_step1 + step2_gas * price_step2
-
-            result["estimated_gas_bill_amount"] = round(estimated_water, 2)
-
-        else:
-
-            result["estimated_gas_bill_amount"] = 0.0
+            result["estimated_gas_bill_amount"] = None
 
         # 累计燃气费用 = 历史账单总和
         try:
@@ -1421,7 +1219,7 @@ async def async_setup_entry(
             await cost_store.async_load()
             cost_history = cost_store.get_bill_history(limit=999)
             historical_cost = sum(float(b.get("billAmt", 0) or 0) for b in cost_history)
-            current_cost = float(result.get("estimated_gas_bill_amount", 0) or 0)
+            current_cost = float(result.get("estimated_gas_bill_amount") or 0)
             result["total_gas_cost"] = round(historical_cost + current_cost, 2)
         except Exception:
             result["total_gas_cost"] = result.get("total_gas_cost", 0.0)
