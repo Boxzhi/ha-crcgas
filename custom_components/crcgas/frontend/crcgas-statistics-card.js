@@ -1,5 +1,5 @@
 /**
- * crcgas-statistics-card v4.0 — 华润燃气对比统计卡片（通用版）
+ * crcgas-statistics-card v4.1 — 华润燃气对比统计卡片（通用版）
  * - 双年对比折线图（SVG 绘制）
  * - 用气量/费用切换
  * - 阶梯用量进度条
@@ -28,16 +28,48 @@ function _niceStep(maxV) {
   return Math.round(maxV / 20 / 100) * 100;
 }
 
+// Missing measurements are null, never an invented zero or tariff.
+function _numeric(value) {
+  if (value == null || typeof value === 'boolean' || String(value).trim() === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+function _metric(value) {
+  const n = _numeric(value);
+  return n !== null && n >= 0 ? n : null;
+}
+function _money(value) { return value == null ? '—' : '¥' + value.toFixed(0); }
+function _sumKnown(rows, key) {
+  if (!rows.length || rows.some(row => _metric(row[key]) === null)) return null;
+  return rows.reduce((total, row) => total + _metric(row[key]), 0);
+}
+function _tierProgress(ld) {
+  const bars = [];
+  for (const [label, limit, used, remain, cls] of [
+    ['一阶', ld.step1Limit, ld.step1Sum, ld.step1Remain, ''],
+    ['二阶', ld.step2Limit, ld.step2Sum, ld.step2Remain, ' s2'],
+  ]) {
+    if ([limit, used, remain].some(v => _metric(v) === null) ||
+        limit <= 0 || used > limit || Math.abs(limit - used - remain) > 0.2) continue;
+    const pct = (used / limit * 100).toFixed(1);
+    bars.push(`<div class="st"><div class="sh"><span class="sl">${label}已用 ${used}/${limit} m³</span><span class="sr">余 ${remain} m³</span></div><div class="sp"><div class="sf${cls}" style="width:${pct}%"></div></div></div>`);
+  }
+  if (ld.step3Sum != null && ld.step3Sum > 0) {
+    bars.push(`<div class="st"><div class="sh"><span class="sl">三阶已用 ${ld.step3Sum} m³</span></div></div>`);
+  }
+  const status = ld.tierStatus === 'stale' ? '<div class="sh">阶梯数据待更新</div>' : '';
+  return `<div class="ts">${status}${bars.join('') || '阶梯数据暂无'}</div>`;
+}
+
 /** 生成 SVG 悬浮提示（在图表内部渲染） */
-function _makeTipSVG(month, d1, d2, y1, y2, price, PL, SX, H, W, pos) {
+function _makeTipSVG(month, d1, d2, y1, y2, PL, SX, H, W, pos) {
   const sd1 = d1[month];
   const sd2 = d2[month];
   if (!sd1 && !sd2) return '';
-  const g1 = sd1 ? Math.max(0, sd1.change).toFixed(1) : '0.0';
-  const g2 = sd2 ? Math.max(0, sd2.change).toFixed(1) : '0.0';
-  // 优先用实际账单金额，无则用单价推算
-  const c1 = sd1 ? '¥' + (sd1.cost ? Math.max(0, sd1.cost).toFixed(0) : (Math.max(0, sd1.change) * price).toFixed(0)) : '¥0';
-  const c2 = sd2 ? '¥' + (sd2.cost ? Math.max(0, sd2.cost).toFixed(0) : (Math.max(0, sd2.change) * price).toFixed(0)) : '¥0';
+  const g1 = _metric(sd1?.change) === null ? '—' : Number(sd1.change).toFixed(1);
+  const g2 = _metric(sd2?.change) === null ? '—' : Number(sd2.change).toFixed(1);
+  const c1 = _money(_metric(sd1?.cost));
+  const c2 = _money(_metric(sd2?.cost));
   const TW = 100, TH = 44;
   let tx = pos ? Math.max(2, Math.min(W - TW - 2, pos.x - TW / 2)) : 2;
   let ty = pos ? Math.max(2, Math.min(H - TH - 2, pos.y - TH - 8)) : 2;
@@ -57,14 +89,14 @@ function _buildEntityIds(prefix) {
     balance: `${p}_ran_qi_zhang_hu_yu_e`,
     monthlyUsage: `${p}_ben_yue_lei_ji_yong_qi_liang`,
     monthlyCost: `${p}_zhang_dan_jin_e`,
-    step1Remain: `${p}_yi_dang_sheng_yu_qi_liang`,
-    step2Remain: `${p}_er_dang_sheng_yu_qi_liang`,
+    step1Remain: [`${p}_yi_jie_ti_sheng_yu_qi_liang`, `${p}_yi_dang_sheng_yu_qi_liang`],
+    step2Remain: [`${p}_er_jie_ti_sheng_yu_qi_liang`, `${p}_er_dang_sheng_yu_qi_liang`],
     status: `${p}_ji_cheng_zhuang_tai`,
-    step1Price: `${p}_yi_dang_qi_jie`,
-    step1Used: `${p}_yi_dang_yong_qi_liang`,
-    step2Used: `${p}_er_dang_yong_qi_liang`,
+    tierStatus: `${p}_jie_ti_shu_ju_zhuang_tai`,
     step1Limit: `${p}_yi_dang_zong_xian_e`,
-    step1Sum: `${p}_yi_dang_lei_ji_yong_liang`,
+    step1Sum: [`${p}_yi_jie_ti_lei_ji_yi_yong`, `${p}_yi_dang_lei_ji_yong_liang`],
+    step2Sum: [`${p}_er_jie_ti_lei_ji_yi_yong`, `${p}_er_dang_lei_ji_yong_liang`],
+    step3Sum: `${p}_san_jie_ti_lei_ji_yi_yong`,
     step2Limit: `${p}_er_dang_zong_xian_e`,
     latestUsage: `${p}_ben_qi_yong_qi_liang`,
     latestBill: `${p}_zhang_dan_jin_e`,
@@ -122,7 +154,7 @@ class CrcgasStatisticsCard extends HTMLElement {
     this._liveData = {
       balance: null, monthlyUsage: null, monthlyCost: null,
       step1Remain: null, step2Remain: null, status: null,
-      step1Price: null, step1Used: null, step2Used: null,
+      tierStatus: null, step2Sum: null, step3Sum: null,
       step1Limit: null, step2Limit: null, step1Sum: null,
       latestUsage: null, latestBill: null, latestPeriod: null,
     };
@@ -284,22 +316,28 @@ class CrcgasStatisticsCard extends HTMLElement {
       });
       const gasStats = result?.[statIds[0]] || [];
       const costStats = result?.[statIds[1]] || [];
-      // 按月份索引费用数据
-      const costByMonth = {};
-      for (const s of costStats) {
-        const d = new Date(s.start);
-        costByMonth[d.getMonth()] = s.change || 0;
-      }
+      // HA month statistics expose real measured state/change; missing amounts stay null.
       const byMonth = {};
-      for (const s of gasStats) {
-        const d = new Date(s.start);
-        const m = d.getMonth();
-        byMonth[m] = {
-          change: s.change || 0,
-          sum: s.sum || s.state || 0,
-          state: s.state || 0,
-          cost: costByMonth[m] || 0,
-        };
+      const monthOf = value => {
+        if (value == null) return null;
+        const d = new Date(value);
+        if (!Number.isFinite(d.getTime())) return null;
+        const parts = new Intl.DateTimeFormat('en-US', {
+          timeZone: this._hass.config?.time_zone || 'Asia/Shanghai',
+          year: 'numeric', month: 'numeric'
+        }).formatToParts(d);
+        if (Number(parts.find(p => p.type === 'year')?.value) !== year) return null;
+        return Number(parts.find(p => p.type === 'month')?.value) - 1;
+      };
+      for (const [rows, key] of [[gasStats, 'change'], [costStats, 'cost']]) {
+        for (const row of rows) {
+          const m = monthOf(row.start);
+          if (m === null) continue;
+          if (!byMonth[m]) byMonth[m] = {change: null, cost: null};
+          const raw = key === 'cost' || !this._config.historyEntity
+            ? (_metric(row.state) ?? _metric(row.change)) : _metric(row.change);
+          byMonth[m][key] = raw;
+        }
       }
       this._yearData[year] = byMonth;
     } catch (e) {
@@ -311,7 +349,13 @@ class CrcgasStatisticsCard extends HTMLElement {
     if (!this._hass || !this._entityPrefix) return;
     const ids = _buildEntityIds(this._entityPrefix);
     const states = this._hass.states;
-    const _val = (id, def = 0) => states[id] ? Number(states[id].state) || def : null;
+    const _val = (ids) => {
+      for (const id of Array.isArray(ids) ? ids : [ids]) {
+        // An existing but unavailable entity must not silently borrow another account's value.
+        if (states[id]) return _numeric(states[id].state);
+      }
+      return null;
+    };
     const _str = (id, def = null) => states[id] ? states[id].state : def;
 
     this._liveData = {
@@ -323,13 +367,12 @@ class CrcgasStatisticsCard extends HTMLElement {
       step1Remain: _val(ids.step1Remain),
       step2Remain: _val(ids.step2Remain),
       status: _str(ids.status),
-      step1Price: _val(ids.step1Price, 3.1),
-      step1Used: _val(ids.step1Used),
-      step2Used: _val(ids.step2Used),
-      // 限额传感器可能使用不同前缀，单独查找
-      step1Limit: _val(ids.step1Limit) || _val('sensor.hua_run_ran_qi_yi_dang_zong_xian_e'),
-      step2Limit: _val(ids.step2Limit) || _val('sensor.hua_run_ran_qi_er_dang_zong_xian_e'),
-      step1Sum: _val(ids.step1Sum) || _val('sensor.hua_run_ran_qi_yi_dang_lei_ji_yong_liang'),
+      tierStatus: _str(ids.tierStatus),
+      step1Limit: _val(ids.step1Limit),
+      step2Limit: _val(ids.step2Limit),
+      step1Sum: _val(ids.step1Sum),
+      step2Sum: _val(ids.step2Sum),
+      step3Sum: _val(ids.step3Sum),
       latestUsage: _val(ids.latestUsage),
       latestBill: _val(ids.latestBill),
       latestPeriod: _str(ids.latestPeriod),
@@ -340,14 +383,12 @@ class CrcgasStatisticsCard extends HTMLElement {
   _renderChart(y1, y2, mode, chartType, hoverMonth, hoverPos) {
     const d1 = this._yearData[y1] || {};
     const d2 = this._yearData[y2] || {};
-    const p = this._liveData?.step1Price || 3.1;
     const months = 12;
     const v1 = [], v2 = [];
     for (let m = 0; m < months; m++) {
-      let a = d1[m] ? d1[m].change : 0, b = d2[m] ? d2[m].change : 0;
-      if (mode === 'cost') { a = d1[m] ? (d1[m].cost || a * p) : 0; b = d2[m] ? (d2[m].cost || b * p) : 0; }
-      v1.push(Math.max(0, a));
-      v2.push(Math.max(0, b));
+      const key = mode === 'cost' ? 'cost' : 'change';
+      v1.push(_metric(d1[m]?.[key]));
+      v2.push(_metric(d2[m]?.[key]));
     }
     const maxV = Math.max(...v1, ...v2, 1);
     const W = 280, H = 140, PT = 16, PB = 22, PL = 30, PR = 6;
@@ -382,20 +423,28 @@ class CrcgasStatisticsCard extends HTMLElement {
       const highlightCol = hoverMonth !== null
         ? '<rect x="' + (Math.max(PL, PL + hoverMonth * SX - SX * 0.45)).toFixed(1) + '" y="' + PT + '" width="' + (SX * 0.9).toFixed(1) + '" height="' + CH.toFixed(1) + '" class="crc-hover" rx="4"/>'
         : '';
-      const tipSVG = hoverMonth !== null ? _makeTipSVG(hoverMonth, d1, d2, y1, y2, p, PL, SX, H, W, hoverPos) : '';
+      const tipSVG = hoverMonth !== null ? _makeTipSVG(hoverMonth, d1, d2, y1, y2, PL, SX, H, W, hoverPos) : '';
       return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:100%;display:block;"><style>.crc-hover{fill:var(--primary-color);opacity:0.08;pointer-events:none}</style>${grid}${highlightCol}${bars}${labels}${tipSVG}</svg>`;
     }
 
     // 折线图
     const lineSVG = (vals, color, year) => {
-      let pts = '', dots = '', area = '';
+      let pts = '', dots = '', area = '', segment = [];
+      const closeSegment = () => {
+        if (!segment.length) return;
+        const first = segment[0], last = segment[segment.length - 1];
+        area += first.path + segment.slice(1).map(p => p.path.replace(/^M/, 'L')).join('') + ` L${last.x},${H-PB} L${first.x},${H-PB} Z`;
+        segment = [];
+      };
       for (let i = 0; i < months; i++) {
+        if (vals[i] === null) { closeSegment(); continue; }
         const x = PL + i * SX, y = Math.max(PT, Math.min(H - PB, py(vals[i])));
-        pts += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1);
-        if (vals[i] > 0) dots += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.5" fill="${color}" opacity="0.9" cursor="pointer" data-action="month" data-year="${year}" data-month="${i}"/><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="14" fill="transparent" cursor="pointer" data-action="month" data-year="${year}" data-month="${i}"/>`;
+        const point = x.toFixed(1) + ',' + y.toFixed(1);
+        pts += (segment.length ? 'L' : 'M') + point;
+        segment.push({x: x.toFixed(1), path: 'M' + point});
+        if (vals[i] !== null) dots += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.5" fill="${color}" opacity="0.9" cursor="pointer" data-action="month" data-year="${year}" data-month="${i}"/><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="14" fill="transparent" cursor="pointer" data-action="month" data-year="${year}" data-month="${i}"/>`;
       }
-      const lastX = PL + (months - 1) * SX;
-      area = pts + ` L${lastX.toFixed(1)},${(H-PB).toFixed(1)} L${PL.toFixed(1)},${(H-PB).toFixed(1)} Z`;
+      closeSegment();
       return `<path d="${pts}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
 <path d="${area}" fill="${color}" opacity="0.08"/>
 ${dots}`;
@@ -417,7 +466,7 @@ ${dots}`;
     const highlightCol = hoverMonth !== null
       ? '<rect x="' + (Math.max(PL, PL + hoverMonth * SX - SX * 0.45)).toFixed(1) + '" y="' + PT + '" width="' + (SX * 0.9).toFixed(1) + '" height="' + CH.toFixed(1) + '" class="crc-hover" rx="4"/>'
       : '';
-    const tipSVG = hoverMonth !== null ? _makeTipSVG(hoverMonth, d1, d2, y1, y2, p, PL, SX, H, W, hoverPos) : '';
+    const tipSVG = hoverMonth !== null ? _makeTipSVG(hoverMonth, d1, d2, y1, y2, PL, SX, H, W, hoverPos) : '';
     return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:100%;display:block;pointer-events:auto;"><style>.crc-hover{fill:var(--primary-color);opacity:0.08;pointer-events:none}</style>${grid}${highlightCol}${lineSVG(v1, C1, y1)}${lineSVG(v2, C2, y2)}${labels}${tipSVG}</svg>`;
   }
 
@@ -425,18 +474,19 @@ ${dots}`;
     const y1 = this._year, y2 = this._year - 1, mode = this._viewMode;
     const d1 = this._yearData[y1] || {}, d2 = this._yearData[y2] || {};
     const ld = this._liveData || {};
-    const p = ld.step1Price || 3.1;
     const maxMonth = new Date().getMonth();
-    const y1Total = Object.entries(d1).filter(([m]) => Number(m) <= maxMonth).reduce((s, [,v]) => s + Math.max(0, v.change || 0), 0);
-    const y2Total = Object.entries(d2).filter(([m]) => Number(m) <= maxMonth).reduce((s, [,v]) => s + Math.max(0, v.change || 0), 0);
-    // 年度费用：优先用实际账单数据，无则用单价推算
-    const y1Cost = Object.values(d1).reduce((s, v) => s + (v.cost || v.change * p || 0), 0);
-    const y2Cost = Object.values(d2).reduce((s, v) => s + (v.cost || v.change * p || 0), 0);
+    const periodRows = d => Object.entries(d).filter(([m]) => Number(m) <= maxMonth).map(([,v]) => v);
+    const y1Total = _sumKnown(periodRows(d1), 'change');
+    const y2Total = _sumKnown(periodRows(d2), 'change');
+    const y1Cost = _sumKnown(periodRows(d1), 'cost');
+    const y2Cost = _sumKnown(periodRows(d2), 'cost');
     const unit = mode === 'gas' ? 'm³' : '元';
     const unitLabel = mode === 'gas' ? '用气量' : '费用';
-    const y1Val = mode === 'gas' ? y1Total.toFixed(1) : '¥' + y1Cost.toFixed(0);
-    const y2Val = mode === 'gas' ? y2Total.toFixed(1) : '¥' + y2Cost.toFixed(0);
-    const diff = mode === 'gas' ? y1Total - y2Total : y1Cost - y2Cost;
+    const y1Val = mode === 'gas' ? y1Total?.toFixed(1) ?? '—' : _money(y1Cost);
+    const y2Val = mode === 'gas' ? y2Total?.toFixed(1) ?? '—' : _money(y2Cost);
+    const first = mode === 'gas' ? y1Total : y1Cost;
+    const second = mode === 'gas' ? y2Total : y2Cost;
+    const diff = first === null || second === null ? null : first - second;
     const diffColor = diff > 0 ? '#f44336' : diff < 0 ? '#4caf50' : 'var(--secondary-text-color)';
     const diffSym = diff > 0 ? '↑' : diff < 0 ? '↓' : '→';
     // 从统计数据中找最近有数据的月份（确保和图表的月份一致）
@@ -456,34 +506,16 @@ ${!this._loading?`
 <div class="cl"><span class="li"><span class="ld" style="background:#ff7043"></span> 本年</span><span class="li"><span class="ld" style="background:#7c4dff"></span> 去年同期</span></div>
 <div class="ca">${this._renderChart(y1,y2,mode,this._chartType,this._hoverMonth?this._hoverMonth.month:null,this._hoverPos)}</div>
 <div class="sr">
-<div class="sc"><div class="sv">${y1Val}</div><div class="sl">本年${unitLabel}</div><div class="sd" style="color:${diffColor}">${diffSym} ${Math.abs(diff).toFixed(mode==='gas'?1:0)}${unit}</div></div>
+<div class="sc"><div class="sv">${y1Val}</div><div class="sl">本年${unitLabel}</div><div class="sd" style="color:${diffColor}">${diff === null ? '—' : diffSym + ' ' + Math.abs(diff).toFixed(mode==='gas'?1:0) + unit}</div></div>
 <div class="sc"><div class="sv">${y2Val}</div><div class="sl">去年同期${unitLabel}</div></div>
 <div class="sc"><div class="sv${ld.balance!==null&&ld.balance<10?' w':''}">${ld.balance!==null?'¥'+ld.balance.toFixed(2):'--'}</div><div class="sl">余额</div></div>
 <div class="sc"><div class="sv">${ld.latestUsage!==null?ld.latestUsage.toFixed(1)+'m³':'--'}</div><div class="sl">${periodLabel}用气</div></div>
 <div class="sc"><div class="sv">${ld.latestBill!==null?'¥'+ld.latestBill.toFixed(0):'--'}</div><div class="sl">${periodLabel}费用</div></div>
 </div>
-${ld.step1Remain!==null?(() => {
-  const bars = [];
-  // 一阶：年度总用气 / 年度限额
-  const s1Limit = ld.step1Limit || 330;
-  const y1Sum = Object.values(d1).reduce((s, v) => s + Math.max(0, v.change || 0), 0);
-  if (y1Sum > 0 && s1Limit > 0) {
-    const used = Math.min(y1Sum, s1Limit);
-    const pct = (used / s1Limit * 100).toFixed(0);
-    bars.push(`<div class="st"><div class="sh"><span class="sl">一阶已用 ${used}/${s1Limit} m³</span><span class="sr">余 ${s1Limit - used} m³</span></div><div class="sp"><div class="sf" style="width:${pct}%"></div></div></div>`);
-  }
-  // 二阶（有使用时才显示）
-  if (ld.step2Used && ld.step2Used > 0 && ld.step2Remain !== null) {
-    const s2Used = ld.step2Used;
-    const s2Total = s2Used + ld.step2Remain;
-    const s2Pct = s2Total > 0 ? (s2Used / s2Total * 100).toFixed(0) : 0;
-    bars.push(`<div class="st"><div class="sh"><span class="sl">二阶已用 ${s2Used} m³</span><span class="sr">余 ${ld.step2Remain} m³</span></div><div class="sp"><div class="sf s2" style="width:${s2Pct}%"></div></div></div>`);
-  }
-  return `<div class="ts">${bars.join('')}</div>`;
-})() : ''}
+${_tierProgress(ld)}
 <div class="f">
-<div class="fr"><span>${y1}年用气总计</span><span class="fv">${y1Total.toFixed(1)} m³</span></div>
-<div class="fr"><span>${y1}年费用</span><span class="fv">¥${y1Cost.toFixed(0)}</span></div>
+<div class="fr"><span>${y1}年用气总计</span><span class="fv">${y1Total === null ? '—' : y1Total.toFixed(1) + ' m³'}</span></div>
+<div class="fr"><span>${y1}年费用</span><span class="fv">${_money(y1Cost)}</span></div>
 ${ld.status?`<div class="fr"><span>集成状态</span><span class="fv" style="color:${ld.status==='normal'||ld.status==='正常'?'#4caf50':'#f44336'}">${ld.status}</span></div>`:''}
 </div>`:''}
 </div></ha-card></div>`;

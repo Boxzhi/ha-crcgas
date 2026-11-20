@@ -6,6 +6,7 @@
 
 import json
 import logging
+from math import isfinite
 import sqlite3
 import time as time_mod
 from datetime import timedelta, datetime, timezone
@@ -44,16 +45,23 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
-def _safe_float(value, default=0):
-    """安全转换数字为float，去除千分位逗号"""
-    if value is None or value == "":
-        return default
-    if isinstance(value, (int, float)):
-        return float(value)
+def _numeric_value(value):
+    """Preserve signed values and genuine zero; missing/invalid is unknown."""
+    if value is None or isinstance(value, bool):
+        return None
     try:
-        return float(str(value).replace(",", ""))
+        val = float(str(value).replace(",", ""))
     except (ValueError, TypeError):
-        return default
+        return None
+    return val if isfinite(val) else None
+
+
+def _first_number(*values):
+    for value in values:
+        val = _numeric_value(value)
+        if val is not None:
+            return val
+    return None
 
 
 _STATE_CLASS_MAP = {
@@ -157,11 +165,11 @@ class HuarunGasSensor(BaseSensor):
 
         if self.sensor_type == "arrears":
             v = data.get("arrears")
-            return float(v) if v is not None else 0.0
+            return _numeric_value(v)
 
         elif self.sensor_type == "account_balance":
             v = data.get("account_balance")
-            return float(v) if v is not None else 0.0
+            return _numeric_value(v)
 
         elif self.sensor_type == "last_pay_time":
             v = data.get("last_pay_time")
@@ -169,35 +177,35 @@ class HuarunGasSensor(BaseSensor):
 
         elif self.sensor_type == "last_pay_amount":
             v = data.get("last_pay_amount")
-            return float(v) if v is not None else 0.0
+            return _numeric_value(v)
 
         elif self.sensor_type == "annual_pay_count":
             v = data.get("annual_pay_count")
-            return float(v) if v is not None else 0.0
+            return _numeric_value(v)
 
         elif self.sensor_type == "this_read":
             v = data.get("this_read")
-            val = float(v) if v is not None else 0.0
-            if val > 0:
+            val = number(v)
+            if val is not None:
                 self._last_good_value = val
                 return val
-            return self._last_good_value if self._last_good_value is not None else 0.0
+            return self._last_good_value
 
         elif self.sensor_type == "total_gas_consumption":
             v = data.get("this_read")
-            val = float(v) if v is not None else 0.0
-            if val > 0:
+            val = number(v)
+            if val is not None:
                 self._last_good_value = val
                 return val
-            return self._last_good_value if self._last_good_value is not None else 0.0
+            return self._last_good_value
 
         elif self.sensor_type == "total_gas_cost":
             v = data.get("total_gas_cost")
-            val = float(v) if v is not None else 0.0
-            if val > 0:
+            val = number(v)
+            if val is not None:
                 self._last_good_value = val
                 return val
-            return self._last_good_value if self._last_good_value is not None else 0.0
+            return self._last_good_value
 
         elif self.sensor_type == "this_read_time":
             v = data.get("this_read_time")
@@ -205,19 +213,19 @@ class HuarunGasSensor(BaseSensor):
 
         elif self.sensor_type == "this_gas_used":
             v = data.get("this_gas_used")
-            return float(v) if v is not None else 0.0
+            return _numeric_value(v)
 
         elif self.sensor_type == "bill_amount":
             v = data.get("bill_amount")
-            return float(v) if v is not None else 0.0
+            return _numeric_value(v)
 
         elif self.sensor_type == "penalty_amount":
             v = data.get("penalty_amount")
-            return float(v) if v is not None else 0.0
+            return _numeric_value(v)
 
         elif self.sensor_type == "last_read":
             v = data.get("last_read")
-            return float(v) if v is not None else 0.0
+            return _numeric_value(v)
 
         elif self.sensor_type == "last_read_time":
             v = data.get("last_read_time")
@@ -237,7 +245,7 @@ class HuarunGasSensor(BaseSensor):
 
         elif self.sensor_type == "gas_nature":
             v = data.get("gas_nature")
-            return v if v and v != "未知" else "天然气"
+            return v if v and v != "未知" else "未知"
 
         elif self.sensor_type == "purchase_style":
             v = data.get("purchase_style")
@@ -246,11 +254,11 @@ class HuarunGasSensor(BaseSensor):
 
         elif self.sensor_type == "last_month_gas":
             v = data.get("last_month_gas")
-            return float(v) if v is not None else 0.0
+            return _numeric_value(v)
 
         elif self.sensor_type == "year_avg_gas":
             v = data.get("year_avg_gas")
-            return float(v) if v is not None else 0.0
+            return _numeric_value(v)
 
         elif self.sensor_type == "integration_status":
             v = data.get("integration_status")
@@ -258,15 +266,15 @@ class HuarunGasSensor(BaseSensor):
 
         elif self.sensor_type == "monthly_gas_used":
             v = data.get("monthly_gas_used")
-            return float(v) if v is not None else 0.0
+            return _numeric_value(v)
 
         elif self.sensor_type == "gas_energy_dashboard":
             v = data.get("this_read")
-            val = float(v) if v is not None else 0.0
-            if val > 0:
+            val = number(v)
+            if val is not None:
                 self._last_good_value = val
                 return val
-            return self._last_good_value if self._last_good_value is not None else 0.0
+            return self._last_good_value
 
         elif self.sensor_type == "cons_name":
             v = data.get("cons_name")
@@ -290,7 +298,7 @@ class HuarunGasSensor(BaseSensor):
 
         elif self.sensor_type == "revbl_amount":
             v = data.get("revbl_amount")
-            return float(v) if v is not None else 0.0
+            return _numeric_value(v)
 
         elif self.sensor_type == "penalty_date":
             v = data.get("penalty_date")
@@ -425,8 +433,10 @@ def _import_history_statistics(hass, entry, bill_history, current_reading=None):
             # Skip existing months (already in statistics)
             continue
         year, month = int(ym[:4]), int(ym[5:7])
-        gas_amt = float(bill.get("gasAmt", 0) or 0)
-        bill_amt = float(bill.get("billAmt", 0) or 0)
+        gas_amt = number(bill.get("gasAmt"))
+        bill_amt = number(bill.get("billAmt"))
+        if gas_amt is None or bill_amt is None:
+            continue
         cumulative_gas += gas_amt
         cumulative_bill += bill_amt
         start = datetime(year, month, 1, tzinfo=timezone.utc)
@@ -499,12 +509,14 @@ async def _import_meter_history_to_entity(hass, entry, bill_history, only_missin
         if not ym or len(ym) < 7:
             continue
         year, month = int(ym[:4]), int(ym[5:7])
-        gas_amt = float(bill.get("gasAmt", 0) or 0)
+        gas_amt = number(bill.get("gasAmt"))
+        bill_amt = number(bill.get("billAmt"))
+        if gas_amt is None or bill_amt is None:
+            continue
         cumulative += gas_amt
         start_ts = datetime(year, month, 1, tzinfo=timezone.utc).timestamp()
         stats_data.append((start_ts, cumulative))
         # 费用累计
-        bill_amt = float(bill.get("billAmt", 0) or 0)
         cumulative_cost += bill_amt
         cost_stats_data.append((start_ts, cumulative_cost))
 
@@ -768,17 +780,17 @@ async def async_setup_entry(
 
         result = {
 
-            "arrears": 0,
+            "arrears": None,
 
-            "account_balance": 0,
+            "account_balance": None,
 
             "last_pay_time": "未知",
 
-            "last_pay_amount": 0,
+            "last_pay_amount": None,
 
-            "annual_pay_count": 0,
+            "annual_pay_count": None,
 
-            "this_read": 0,
+            "this_read": None,
 
             "this_read_time": "未知",
 
@@ -786,17 +798,17 @@ async def async_setup_entry(
 
             "step2_gas_used": None,
 
-            "this_gas_used": 0,
+            "this_gas_used": None,
 
-            "bill_amount": 0,
+            "bill_amount": None,
 
             "step1_remain": None,
 
             "step2_remain": None,
             "step3_remain": None,
 
-            "penalty_amount": 0,
-            "last_read": 0,
+            "penalty_amount": None,
+            "last_read": None,
             "last_read_time": "未知",
             "settle_flag": "未知",
 
@@ -808,20 +820,20 @@ async def async_setup_entry(
 
             "purchase_style": "未知",
 
-            "last_month_gas": 0,
+            "last_month_gas": None,
 
-            "year_avg_gas": 0,
+            "year_avg_gas": None,
 
             "integration_status": "unknown",
 
-            "monthly_gas_used": 0,
+            "monthly_gas_used": None,
 
             "cons_name": "未知",
             "mobile": "未知",
             "meter_no": "未知",
             "area_name": "未知",
             "account_status": "未知",
-            "revbl_amount": 0.0,
+            "revbl_amount": None,
             "penalty_date": "未知",
             "last_fetch_time": "未知",
             "bill_month": "未知",
@@ -864,9 +876,9 @@ async def async_setup_entry(
 
                 if isinstance(data, dict):
 
-                    result["arrears"] = float(data.get("totalAmt", 0) or 0)
+                    result["arrears"] = _numeric_value(data.get("totalAmt"))
 
-                    result["account_balance"] = float(data.get("totalBal", 0) or 0)
+                    result["account_balance"] = _numeric_value(data.get("totalBal"))
 
         except Exception as e:
 
@@ -894,7 +906,7 @@ async def async_setup_entry(
 
                     result["last_pay_time"] = last_pay.get("payTime", "未知")
 
-                    result["last_pay_amount"] = float(last_pay.get("payAmount", 0) or 0)
+                    result["last_pay_amount"] = _numeric_value(last_pay.get("payAmount"))
 
                     current_year = str(datetime.now().year)
 
@@ -942,12 +954,12 @@ async def async_setup_entry(
 
                     result["_last_app_no"] = last_bill.get("applicationNo", "")
 
-                    result["last_bill_gas_amt"] = float(last_bill.get("gasAmt", 0) or 0)
+                    result["last_bill_gas_amt"] = _numeric_value(last_bill.get("gasAmt"))
 
-                    result["last_bill_penalty"] = float(last_bill.get("penaltyAmt", 0) or 0)
+                    result["last_bill_penalty"] = _numeric_value(last_bill.get("penaltyAmt"))
 
                     result["settle_flag"] = last_bill.get("settleFlag", "未知")
-                    result["revbl_amount"] = float(last_bill.get("revblAmt", 0) or 0)
+                    result["revbl_amount"] = _numeric_value(last_bill.get("revblAmt"))
                     result["penalty_date"] = last_bill.get("penaltyDate", "未知")
                     result["bill_month"] = last_bill.get("billYm", "未知")
 
@@ -957,7 +969,8 @@ async def async_setup_entry(
                         hs = CRCGasHistoryStorage(hass, config_entry.entry_id)
                         await hs.async_load()
                         existing_app_nos = {b["applicationNo"] for b in hs.get_bill_history(limit=999) if b.get("applicationNo")}
-                        new_bills = [b for b in bills if b.get("applicationNo") not in existing_app_nos]
+                        new_bills = [b for b in bills if b.get("applicationNo") and b["applicationNo"] not in existing_app_nos
+                                     and number(b.get("gasAmt")) is not None and number(b.get("billAmt")) is not None]
                         if new_bills:
                             for nb in new_bills:
                                 await hs.async_add_bill_record(nb)
@@ -982,8 +995,8 @@ async def async_setup_entry(
                                     ym = nb.get("billYm", "")
                                     if len(ym) < 7: continue
                                     year, month = int(ym[:4]), int(ym[5:7])
-                                    gas_amt = float(nb.get("gasAmt", 0) or 0)
-                                    bill_amt = float(nb.get("billAmt", 0) or 0)
+                                    gas_amt = number(nb.get("gasAmt"))
+                                    bill_amt = number(nb.get("billAmt"))
                                     start = datetime(year, month, 1, tzinfo=timezone.utc)
                                     
                                     last_gas_sum += gas_amt
@@ -1046,9 +1059,9 @@ async def async_setup_entry(
 
                     if len(last_gas) > 1:
 
-                        result["last_month_gas"] = last_gas[1]
+                        result["last_month_gas"] = number(last_gas[1])
 
-                    all_gas = [g for g in last_gas if g is not None]
+                    all_gas = [n for g in last_gas if (n := number(g)) is not None]
 
                     if all_gas:
 
@@ -1056,11 +1069,11 @@ async def async_setup_entry(
 
                     # 统计本年累计用气（thisGas 前几个非空值之和）
                     this_gas = dr.get("thisGas", [])
-                    valid_this = [g for g in this_gas if g is not None and g > 0]
+                    valid_this = [n for g in this_gas if (n := number(g)) is not None]
                     if valid_this:
                         result["annual_gas_used"] = sum(valid_this)
                     else:
-                        result["annual_gas_used"] = 0
+                        result["annual_gas_used"] = None
 
         except Exception as e:
 
@@ -1092,32 +1105,32 @@ async def async_setup_entry(
 
                         detail = details[0]
 
-                        result["this_read"] = detail.get("thisRead", 0)
+                        result["this_read"] = number(detail.get("thisRead"))
 
                         result["this_read_time"] = detail.get("thisReadTime", "未知")
 
-                        result["last_read"] = detail.get("lastRead", 0)
+                        result["last_read"] = number(detail.get("lastRead"))
 
                         result["last_read_time"] = detail.get("lastReadTime", "未知")
 
-                        result["this_gas_used"] = detail.get("gasUsed", 0) or result.get("last_bill_gas_amt", 0)
+                        result["this_gas_used"] = _first_number(detail.get("gasUsed"), result.get("last_bill_gas_amt"))
 
-                        result["bill_amount"] = detail.get("totalAmount", 0) or detail.get("billAmount", 0) or result.get("revbl_amount", 0)
+                        result["bill_amount"] = _first_number(detail.get("totalAmount"), detail.get("billAmount"), result.get("revbl_amount"))
 
-                        result["penalty_amount"] = detail.get("penaltyAmount", 0)
+                        result["penalty_amount"] = number(detail.get("penaltyAmount"))
 
                         result.update(parse_bill_steps(
                             detail.get("gasStepList"), result["this_gas_used"]
                         ))
                     else:
 
-                        result["this_gas_used"] = result.get("last_bill_gas_amt", 0)
+                        result["this_gas_used"] = result.get("last_bill_gas_amt")
 
                 else:
 
-                    result["this_gas_used"] = result.get("last_bill_gas_amt", 0)
+                    result["this_gas_used"] = result.get("last_bill_gas_amt")
 
-                    result["penalty_amount"] = result.get("last_bill_penalty", 0)
+                    result["penalty_amount"] = result.get("last_bill_penalty")
 
             else:
 
@@ -1131,7 +1144,7 @@ async def async_setup_entry(
 
                 session_timeout_count += 1
 
-            result["this_gas_used"] = result.get("last_bill_gas_amt", 0)
+            result["this_gas_used"] = result.get("last_bill_gas_amt")
 
 
 
@@ -1153,7 +1166,7 @@ async def async_setup_entry(
 
                     result["org_name"] = cons_info.get("orgName", "未知")
 
-                    result["gas_nature"] = cons_info.get("gasNature", "未知") or "天然气"
+                    result["gas_nature"] = cons_info.get("gasNature") or "未知"
 
                     result["purchase_style"] = cons_info.get("purchaseGasStyle", "未知")
                     result["cons_name"] = cons_info.get("consName", "未知")
@@ -1191,7 +1204,7 @@ async def async_setup_entry(
 
         # 设置月度累计用气量（暂时用本期用气量代替）
 
-        result["monthly_gas_used"] = result.get("this_gas_used", 0)
+        result["monthly_gas_used"] = result.get("this_gas_used")
 
 
 
@@ -1218,18 +1231,18 @@ async def async_setup_entry(
             cost_store = CRCGasHistoryStorage(hass, config_entry.entry_id)
             await cost_store.async_load()
             cost_history = cost_store.get_bill_history(limit=999)
-            historical_cost = sum(float(b.get("billAmt", 0) or 0) for b in cost_history)
-            current_cost = float(result.get("estimated_gas_bill_amount") or 0)
-            result["total_gas_cost"] = round(historical_cost + current_cost, 2)
+            known_costs = [number(b.get("billAmt")) for b in cost_history]
+            result["total_gas_cost"] = (round(sum(known_costs), 2)
+                                        if known_costs and all(v is not None for v in known_costs) else None)
         except Exception:
-            result["total_gas_cost"] = result.get("total_gas_cost", 0.0)
+            result["total_gas_cost"] = result.get("total_gas_cost")
 
         _LOGGER.info(f"数据更新完成: 欠费¥{result['arrears']}, 读数{result['this_read']}, 状态={result['integration_status']}")
 
         result["last_fetch_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # bill_amount fallback: 如果 detail API 返回 0，用 revbl_amount 兜底
-        if not result.get("bill_amount") and result.get("revbl_amount"):
+        # bill_amount fallback: 仅在详情缺失时使用有效账单金额，保留真实零值
+        if result.get("bill_amount") is None and result.get("revbl_amount") is not None:
             result["bill_amount"] = result["revbl_amount"]
             _LOGGER.info("bill_amount 使用 revbl_amount 兜底: %s", result["bill_amount"])
 

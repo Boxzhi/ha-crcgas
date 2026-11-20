@@ -13,7 +13,7 @@
 (function () {
   'use strict';
 
-  const CARD_VERSION = '1.2.0';
+  const CARD_VERSION = '1.2.1';
 
   class CrcgasCard extends HTMLElement {
     setConfig(config) {
@@ -232,36 +232,49 @@
     }
 
     _formatNumber(val, decimals = 1) {
-      const n = parseFloat(val);
-      return isNaN(n) ? '--' : n.toFixed(decimals);
+      const n = this._number(val);
+      return n === null ? '—' : n.toFixed(decimals);
+    }
+
+    _number(value) {
+      if (value == null || String(value).trim() === '') return null;
+      const n = Number(value);
+      return Number.isFinite(n) ? n : null;
     }
 
     _update() {
       if (!this._hass || !this._cardEl) return;
 
       // 获取实体数据
-      const balance = this._getEntity(`sensor.crcgas_account_balance`);
-      const gasUsed = this._getEntity(`sensor.crcgas_gas_used`);
-      const currentStep = this._getEntity(`sensor.crcgas_current_step`);
-      const estimated = this._getEntity(`sensor.crcgas_estimated_bill_amount`);
-      const s1 = this._getEntity(`sensor.crcgas_step1_gas_used`);
-      const s2 = this._getEntity(`sensor.crcgas_step2_gas_used`);
-      const s3 = this._getEntity(`sensor.crcgas_step3_gas_used`);
-      const avg = this._getEntity(`sensor.crcgas_history_avg_usage`);
-      const vsAvg = this._getEntity(`sensor.crcgas_usage_vs_avg`);
-      const status = this._getEntity(`sensor.crcgas_integration_status`);
-      const updateTime = this._getEntity(`sensor.crcgas_last_update_time`);
-      const lastMonth = this._getEntity(`sensor.crcgas_last_month_gas`);
+      const balance = this._getEntity(this._config.entity);
+      const prefix = this._config.entity_prefix ||
+        this._config.entity.replace(/_(?:ran_qi_zhang_hu_yu_e|account_balance)$/, '');
+      const read = (...suffixes) => {
+        for (const suffix of suffixes) {
+          const entity = this._getEntity(`${prefix}_${suffix}`);
+          if (entity) return entity;
+        }
+        return undefined;
+      };
+      const gasUsed = read('ben_qi_yong_qi_liang', 'gas_used');
+      const estimated = read('yu_gu_ran_qi_zhang_dan', 'estimated_gas_bill_amount', 'estimated_bill_amount');
+      const s1 = read('yi_jie_ti_lei_ji_yi_yong', 'step1_gas_sum');
+      const s2 = read('er_jie_ti_lei_ji_yi_yong', 'step2_gas_sum');
+      const s3 = read('san_jie_ti_lei_ji_yi_yong', 'step3_gas_sum');
+      const avg = read('nian_du_yue_jun_yong_qi_liang', 'history_avg_usage');
+      const vsAvg = read('usage_vs_avg');
+      const status = read('ji_cheng_zhuang_tai', 'integration_status');
+      const updateTime = read('shu_ju_che_qu_shi_jian', 'last_update_time');
+      const lastMonth = read('shang_yue_yong_qi_liang', 'last_month_gas');
 
       // 更新数值
       const setVal = (id, val) => {
         const el = document.getElementById(id);
-        if (el) el.textContent = val;
+        if (el) (el.querySelector('.cc-card-value') || el).textContent = val;
       };
 
       setVal(`${this._cardId}-balance`, '¥' + this._formatNumber(balance?.state));
       setVal(`${this._cardId}-gas`, this._formatNumber(gasUsed?.state));
-      setVal(`${this._cardId}-step`, currentStep?.state || '--');
       setVal(`${this._cardId}-estimated`, '¥' + this._formatNumber(estimated?.state));
       setVal(`${this._cardId}-s1`, this._formatNumber(s1?.state, 2));
       setVal(`${this._cardId}-s2`, this._formatNumber(s2?.state, 2));
@@ -273,34 +286,36 @@
 
       // 状态指示灯
       const dot = document.getElementById(`${this._cardId}-dot`);
-      const st = status?.state || 'normal';
-      dot.className = 'cc-status-dot';
-      if (st !== 'normal') {
-        dot.classList.add(st.includes('error') ? 'error' : 'warning');
+      const st = status?.state;
+      if (dot) {
+        dot.className = 'cc-status-dot';
+        if (st !== 'normal' && st !== '正常') {
+          dot.classList.add(st?.includes('error') ? 'error' : 'warning');
+        }
       }
 
-      // 阶梯进度条
-      const totalGas = parseFloat(gasUsed?.state) || 0;
-      const step1 = parseFloat(s1?.state) || 0;
-      const step2 = parseFloat(s2?.state) || 0;
-      const step3 = parseFloat(s3?.state) || 0;
-
-      // 假设阈值：一阶5m³，二阶10m³，三阶无限
-      const t1 = 5, t2 = 10;
-      let percent = 0;
-      if (totalGas <= t1) {
-        percent = (totalGas / t1) * 33;
-      } else if (totalGas <= t2) {
-        percent = 33 + ((totalGas - t1) / (t2 - t1)) * 33;
-      } else {
-        percent = 66 + Math.min(((totalGas - t2) / t2) * 34, 34);
-      }
-
+      // All thresholds and usage values come from the configured account.
+      const l1 = this._number(read('yi_dang_zong_xian_e', 'step1_gas_limit')?.state);
+      const l2 = this._number(read('er_dang_zong_xian_e', 'step2_gas_limit')?.state);
+      const u1 = this._number(s1?.state), u2 = this._number(s2?.state), u3 = this._number(s3?.state);
+      const r1 = this._number(read('yi_jie_ti_sheng_yu_qi_liang', 'step1_remain')?.state);
+      const r2 = this._number(read('er_jie_ti_sheng_yu_qi_liang', 'step2_remain')?.state);
+      const valid = [l1,l2,u1,u2,u3,r1,r2].every(v => v !== null && v >= 0) &&
+        l1 > 0 && l2 > 0 && Math.abs(l1-u1-r1) <= 0.2 && Math.abs(l2-u2-r2) <= 0.2;
       const fill = document.getElementById(`${this._cardId}-progress-fill`);
-      if (fill) fill.style.width = Math.min(percent, 100) + '%';
-
-      setVal(`${this._cardId}-progress-text`, this._formatNumber(totalGas, 2) + '/' +
-        (totalGas <= t2 ? t2 : (totalGas <= t2 * 2 ? t2 * 2 : '∞')) + 'm³');
+      if (!valid) {
+        if (fill) { fill.style.width = '0%'; fill.style.visibility = 'hidden'; }
+        setVal(`${this._cardId}-step`, '—');
+        setVal(`${this._cardId}-progress-text`, '阶梯数据暂无');
+        return;
+      }
+      const total = u1 + u2 + u3;
+      const tier = u3 > 0 || total >= l1+l2 ? 3 : u2 > 0 || total >= l1 ? 2 : 1;
+      const percent = Math.min(100, total/(l1+l2)*100);
+      if (fill) { fill.style.visibility = ''; fill.style.width = percent + '%'; }
+      setVal(`${this._cardId}-step`, ['','第一阶梯','第二阶梯','第三阶梯'][tier]);
+      setVal(`${this._cardId}-progress-text`, total.toFixed(2) + '/' + (l1+l2) + 'm³' +
+        (tier === 3 ? ' · 超出二阶上限' : ''));
     }
   }
 

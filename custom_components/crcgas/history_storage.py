@@ -208,13 +208,19 @@ class CRCGasHistoryStorage:
                     if not app_no:
                         continue
 
+                    # An incomplete bill is not a zero-usage/zero-fee bill.
+                    from .tiers import number
+                    gas_amt = number(bill.get("gasAmt"))
+                    bill_amt = number(bill.get("billAmt"))
+                    if gas_amt is None or bill_amt is None:
+                        continue
                     bill_record = {
                         "applicationNo": app_no,
                         "billYm": bill.get("billYm"),
-                        "billAmt": float(bill.get("billAmt", 0) or 0),
-                        "gasAmt": float(bill.get("gasAmt", 0) or 0),
-                        "penaltyAmt": float(bill.get("penaltyAmt", 0) or 0),
-                        "revblAmt": float(bill.get("revblAmt", 0) or 0),
+                        "billAmt": bill_amt,
+                        "gasAmt": gas_amt,
+                        "penaltyAmt": number(bill.get("penaltyAmt")),
+                        "revblAmt": number(bill.get("revblAmt")),
                         "settleFlag": bill.get("settleFlag"),
                         "penaltyDate": bill.get("penaltyDate"),
                     }
