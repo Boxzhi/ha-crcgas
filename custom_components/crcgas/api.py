@@ -245,7 +245,6 @@ class HuarunGasApi:
 
     async def _refresh_locked(self):
         """Refresh under the same lock used by all business requests."""
-        self._refresh_attempt += 1
         self._refresh_error = None
         self._refresh_result = {}
         try:
@@ -279,6 +278,9 @@ class HuarunGasApi:
         except Exception as exc:
             self._refresh_error = ApiResponseError
             raise ApiResponseError("Token refresh or persistence failed") from exc
+        finally:
+            # Publish completion, not start, so callers queued during I/O coalesce.
+            self._refresh_attempt += 1
 
     async def async_get_login_info(self) -> Dict[str, Any]:
         """获取登录信息"""
