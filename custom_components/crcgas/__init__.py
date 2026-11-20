@@ -4,6 +4,7 @@ import logging
 from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
@@ -20,6 +21,9 @@ from .const import (
     TOKEN_REFRESH_INTERVAL,
 )
 from . import sensor  # noqa: F401  # 预导入避免 Event Loop 阻塞
+from .payment_websocket import websocket_payment_history
+from .payment_storage import PaymentHistory
+from .const import CONF_CONS_NO
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +31,9 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.info(f"设置华润燃气集成: {entry.title}")
     hass.data.setdefault(DOMAIN, {})
+    if not hass.data[DOMAIN].get("payment_ws_registered"):
+        websocket_api.async_register_command(hass, websocket_payment_history)
+        hass.data[DOMAIN]["payment_ws_registered"] = True
     hass.data[DOMAIN][entry.entry_id] = dict(entry.data)
 
     # ========== 独立 Token 刷新定时器 ==========
@@ -117,4 +124,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN].pop(entry.entry_id, None)
         hass.data[DOMAIN].pop(f"{entry.entry_id}_coordinator", None)
         hass.data[DOMAIN].pop(f"{entry.entry_id}_api", None)
+        hass.data[DOMAIN].pop(f"{entry.entry_id}_payment_cache", None)
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Remove the private payment snapshot when the gas account is deleted."""
+    await PaymentHistory(hass, entry.entry_id, entry.data.get(CONF_CONS_NO, "")).async_remove()

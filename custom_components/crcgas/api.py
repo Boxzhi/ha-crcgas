@@ -319,7 +319,7 @@ class HuarunGasApi:
         """获取 BO Token"""
         return await self._request("GET", API_GET_BO_TOKEN)
 
-    async def async_query_pay_history(self, cons_no: str, page: int = 1, page_num: int = 12, start_ym: str = "2020-01", end_ym: str = "2100-12") -> Dict[str, Any]:
+    async def async_query_pay_history(self, cons_no: str, page: int = 1, page_num: int = 6, start_ym: str = "2000-01", end_ym: str = "2100-12") -> Dict[str, Any]:
         """查询缴费历史"""
         params = {"consNo": cons_no, "page": page, "pageNum": page_num, "startYm": start_ym, "endYm": end_ym}
         return await self._request("GET", API_QUERY_PAY_HISTORY, params=params)

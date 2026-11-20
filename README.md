@@ -346,3 +346,24 @@ automation:
 ### v2.1.3 数据真实性
 
 统计卡片的两份 JS 已同步为同一实现，历史费用只读取实际账单统计。阶梯进度读取实际阶梯累计已用、独立限额与剩余量；数据缺失时显示 `—` 或暂无数据。旧版 Python 文件不再随正式代码分发，可通过 Git 历史查看。
+
+### 缴费历史（v2.1.4）
+
+最近缴费金额、时间及年度缴费次数仅统计缴费成功的燃气费（chargeType=01）；业务费（02）另计。新增最近缴费渠道、年度燃气缴费金额、年度业务缴费金额、缴费历史状态及缴费历史更新时间实体。缓存为独立的最近三个自然年快照，服务端分页重叠或请求失败不覆盖有效记录；状态为 fresh/stale/unavailable。正常自动更新时同步采集，不需要额外刷新服务。
+
+WebSocket（已登录 HA，需拥有对应最近缴费金额实体读取权限或管理员）：
+
+```javascript
+const hass = document.querySelector('home-assistant').hass;
+const result = await hass.callWS({
+  type: 'crcgas/payment_history',
+  // entry_id: '配置项ID', // 多个有权限的账户时必填
+  // year: 2026,          // 可选，默认全部可用年份
+  category: 'all',      // all / gas / business / unknown
+  offset: 0,
+  limit: 100,
+});
+console.log(result);
+```
+
+响应含 records、total、has_more、available_years、summaries、status、updated_at、entry_id。每条记录保留原始渠道/收费编码及金额字符串，未知渠道不会猜测；同一时间多笔合法支付保留。历史只读本地快照，不额外请求云端。缴费金额不等同燃气消费金额。

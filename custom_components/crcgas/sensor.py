@@ -28,6 +28,7 @@ from homeassistant.components.sensor.const import SensorStateClass as _SSC
 
 from .api import HuarunGasApi, SessionTimeoutError
 from .tiers import TIER_KEYS, parse_tiers, parse_bill_steps, number
+from .payment_storage import PAYMENT_KEYS, PaymentHistory
 from .const import (
     CONF_BO_TOKEN,
     CONF_CONS_NO,
@@ -72,7 +73,9 @@ _STATE_CLASS_MAP = {
     "step1_gas_used": _SSC.TOTAL_INCREASING,
     "step2_gas_used": _SSC.TOTAL_INCREASING,
     "step3_gas_used": _SSC.TOTAL_INCREASING,
-    "annual_pay_count": _SSC.TOTAL_INCREASING,
+    "annual_pay_count": _SSC.TOTAL,
+    "annual_gas_pay_amount": _SSC.TOTAL,
+    "annual_business_pay_amount": _SSC.TOTAL,
     "gas_energy_dashboard": _SSC.TOTAL_INCREASING,
     "account_balance": _SSC.MEASUREMENT,
     "arrears": _SSC.MEASUREMENT,
@@ -155,6 +158,8 @@ class HuarunGasSensor(BaseSensor):
                 return self._last_good_value
             return None
 
+        if self.sensor_type in PAYMENT_KEYS:
+            return data.get(self.sensor_type)
         if self.sensor_type == "tier_data_status":
             return data.get("tier_data_status", "unavailable")
         if self.sensor_type in TIER_KEYS or self.sensor_type in (
@@ -769,6 +774,9 @@ async def async_setup_entry(
     # ========== 2. 数据更新协调器 ==========
 
     last_valid_tiers = {}
+    payment_cache = PaymentHistory(hass, config_entry.entry_id, cons_no)
+    await payment_cache.async_load()
+    hass.data[DOMAIN][f"{config_entry.entry_id}_payment_cache"] = payment_cache
 
     async def async_update_data():
 
@@ -890,37 +898,14 @@ async def async_setup_entry(
 
 
 
-        # 2. 获取缴费历史
-
+        # 2. 获取缴费历史：所有成功页面构成独立快照，失败保留上次有效数据。
         try:
-
-            pay_data = await api.async_query_pay_history(cons_no)
-
-            if pay_data and pay_data.get("success"):
-
-                pay_result = pay_data.get("dataResult", [])
-
-                if isinstance(pay_result, list) and pay_result:
-
-                    last_pay = pay_result[0]
-
-                    result["last_pay_time"] = last_pay.get("payTime", "未知")
-
-                    result["last_pay_amount"] = _numeric_value(last_pay.get("payAmount"))
-
-                    current_year = str(datetime.now().year)
-
-                    result["annual_pay_count"] = sum(1 for p in pay_result if current_year in str(p.get("payTime", "")))
-
+            await payment_cache.async_refresh(api, cons_no)
         except Exception as e:
-
-            _LOGGER.error(f"获取缴费历史失败: {e}")
-
-            if "SESSION_TIMEOUT" in str(e) or "会话超时" in str(e):
-
+            _LOGGER.warning("缴费历史更新失败，使用有效缓存（%s）", type(e).__name__)
+            if isinstance(e, SessionTimeoutError) or "SESSION_TIMEOUT" in str(e) or "会话超时" in str(e):
                 session_timeout_count += 1
-
-
+        result.update(payment_cache.sensor_data())
 
         # 3. 获取账单列表（获取抄表日期和阶梯剩余气量）
 
@@ -1257,6 +1242,7 @@ async def async_setup_entry(
         _LOGGER,
 
         name=DOMAIN,
+        config_entry=config_entry,
 
         update_method=async_update_data,
 

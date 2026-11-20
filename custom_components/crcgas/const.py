@@ -70,6 +70,28 @@ SENSOR_TYPES = {
         "device_class": "monetary",
         "state_class": "total_increasing",
     },
+    "last_pay_channel": {
+        "name": "最近缴费渠道",
+        "icon": "mdi:wallet-outline",
+    },
+    "annual_gas_pay_amount": {
+        "name": "年度燃气缴费金额",
+        "unit": "¥",
+        "icon": "mdi:cash-multiple",
+    },
+    "annual_business_pay_amount": {
+        "name": "年度业务缴费金额",
+        "unit": "¥",
+        "icon": "mdi:cash-multiple",
+    },
+    "payment_history_status": {
+        "name": "缴费历史状态",
+        "icon": "mdi:database-check",
+    },
+    "payment_history_updated_at": {
+        "name": "缴费历史更新时间",
+        "icon": "mdi:clock-outline",
+    },
     "annual_pay_count": {
         "name": "年度缴费次数",
         "icon": "mdi:counter",
