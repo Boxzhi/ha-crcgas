@@ -21,6 +21,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN, HISTORY_STORAGE_VERSION, HISTORY_RETENTION_MONTHS
+from .bills import merge_bill
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -110,11 +111,20 @@ class CRCGasHistoryStorage:
         await self.async_save()
 
     async def async_add_bill_record(self, record: Dict[str, Any]):
-        """添加账单记录"""
-        record["timestamp"] = datetime.now().isoformat()
-        self._data["bill_history"].append(record)
-        self._cleanup_old_data()
-        await self.async_save()
+        """兼容旧调用，按账单身份更新。"""
+        return await self.async_merge_bills([record])
+
+    async def async_merge_bills(self, bills):
+        records = self._data.setdefault("bill_history", [])
+        counts = {"new": 0, "updated": 0, "invalid": 0}
+        timestamp = datetime.now().isoformat()
+        for bill in bills:
+            status = merge_bill(records, bill, timestamp)
+            counts[status] += 1
+        if counts["new"] or counts["updated"]:
+            records.sort(key=lambda x: x.get("billYm", ""), reverse=True)
+            await self.async_save()
+        return counts
 
     def _cleanup_old_data(self):
         """清理过期数据"""
@@ -183,7 +193,8 @@ class CRCGasHistoryStorage:
         """
         _LOGGER.info("开始抓取所有历史账单...")
 
-        existing_bills = {b["applicationNo"]: b for b in self._data.get("bill_history", [])}
+        existing_bills = self._data.setdefault("bill_history", [])
+        timestamp = datetime.now().isoformat()
 
         page = 1
         page_size = 6  # 与 sensor.py coordinator 保持一致（API对较大page_num可能不支持）
@@ -204,33 +215,9 @@ class CRCGasHistoryStorage:
                     break
 
                 for bill in bills:
-                    app_no = bill.get("applicationNo")
-                    if not app_no:
-                        continue
-
-                    # An incomplete bill is not a zero-usage/zero-fee bill.
-                    from .tiers import number
-                    gas_amt = number(bill.get("gasAmt"))
-                    bill_amt = number(bill.get("billAmt"))
-                    if gas_amt is None or bill_amt is None:
-                        continue
-                    bill_record = {
-                        "applicationNo": app_no,
-                        "billYm": bill.get("billYm"),
-                        "billAmt": bill_amt,
-                        "gasAmt": gas_amt,
-                        "penaltyAmt": number(bill.get("penaltyAmt")),
-                        "revblAmt": number(bill.get("revblAmt")),
-                        "settleFlag": bill.get("settleFlag"),
-                        "penaltyDate": bill.get("penaltyDate"),
-                    }
-
-                    if app_no in existing_bills:
-                        existing_bills[app_no].update(bill_record)
-                        updated_bills += 1
-                    else:
-                        existing_bills[app_no] = bill_record
-                        new_bills += 1
+                    status = merge_bill(existing_bills, bill, timestamp)
+                    new_bills += status == "new"
+                    updated_bills += status == "updated"
 
                 total_fetched += len(bills)
 
@@ -244,7 +231,7 @@ class CRCGasHistoryStorage:
                 break
 
         # 更新存储
-        self._data["bill_history"] = list(existing_bills.values())
+        self._data["bill_history"] = existing_bills
         self._data["bill_history"].sort(key=lambda x: x.get("billYm", ""), reverse=True)
 
         await self.async_save()

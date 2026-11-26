@@ -31,6 +31,7 @@ from homeassistant.components.sensor.const import SensorStateClass as _SSC
 from .api import HuarunGasApi, SessionTimeoutError, TransportError
 from .health import BalanceSnapshot, integration_status
 from .tiers import TIER_KEYS, parse_tiers, parse_bill_steps, number
+from .bills import bill_month, read_date, identifier, previous_usage, monthly_totals
 from .payment_storage import PAYMENT_KEYS, PaymentHistory
 from .schedule import RefreshTimer, effective_schedule
 from .const import (
@@ -72,7 +73,7 @@ def _first_number(*values):
 _STATE_CLASS_MAP = {
     "this_read": _SSC.TOTAL_INCREASING,
     "total_gas_consumption": _SSC.TOTAL_INCREASING,
-    "total_gas_cost": _SSC.TOTAL_INCREASING,
+    "total_gas_cost": _SSC.TOTAL,
     "monthly_gas_used": _SSC.TOTAL_INCREASING,
     "step1_gas_used": _SSC.TOTAL_INCREASING,
     "step2_gas_used": _SSC.TOTAL_INCREASING,
@@ -375,115 +376,76 @@ class HuarunGasMeterHistorySensor(BaseSensor):
         if self._coordinator.data is not None:
             self.async_write_ha_state()
 
-def _import_history_statistics(hass, entry, bill_history, current_reading=None):
-    """将历史账单数据导入 HA 统计系统，形成趋势图（增量：从DB已有累计值继续）"""
-    try:
-        from homeassistant.components.recorder.statistics import (
-            async_add_external_statistics,
-            StatisticMetaData,
-            StatisticMeanType,
-        )
-    except ImportError:
-        _LOGGER.warning("recorder 组件不可用，无法导入历史统计")
+async def _import_history_statistics(hass, entry, bill_history, current_reading=None):
+    """Reconcile integration-owned monthly series without deleting recorder history."""
+    from homeassistant.components.recorder.statistics import (
+        async_add_external_statistics, StatisticMetaData, StatisticMeanType,
+    )
+    import sqlite3
+    from pathlib import Path
+
+    months = monthly_totals(bill_history)
+    if not months:
         return
 
-    sorted_bills = sorted(bill_history, key=lambda b: b.get("billYm", ""))
-    if not sorted_bills:
+    def read_existing():
+        path = Path(hass.config.path("home-assistant_v2.db"))
+        if not path.is_file():
+            return None
+        with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as conn:
+            result = {}
+            for key in ("monthly_gas_usage", "monthly_bill_amount"):
+                result[key] = conn.execute(
+                    "SELECT s.start_ts,s.state,s.sum FROM statistics s "
+                    "JOIN statistics_meta m ON m.id=s.metadata_id "
+                    "WHERE m.statistic_id=? ORDER BY s.start_ts",
+                    (f"{DOMAIN}:{key}",),
+                ).fetchall()
+            return result
+
+    existing = await hass.async_add_executor_job(read_existing)
+    if existing is None:
+        _LOGGER.warning("SQLite monthly statistics unavailable; skipping reconciliation")
         return
-
-    from datetime import datetime, timezone
-    import sqlite3, os
-
-    db_path = os.path.join(hass.config.path(), "home-assistant_v2.db")
-    last_gas_sum = 0.0
-    last_bill_sum = 0.0
-    existing_months = set()
-    last_ts = 0
-
-    try:
-        db_conn = sqlite3.connect(db_path)
-        c = db_conn.cursor()
-
-        # Read existing data
-        meta_gas = c.execute("SELECT id FROM statistics_meta WHERE statistic_id='crcgas:monthly_gas_usage'").fetchone()
-        if meta_gas:
-            existing = c.execute("SELECT start_ts, sum FROM statistics WHERE metadata_id=?", (meta_gas[0],)).fetchall()
-            for ts, s in existing:
-                existing_months.add(datetime.fromtimestamp(ts).strftime("%Y-%m"))
-                if ts > last_ts:
-                    last_gas_sum = s
-                    last_ts = ts
-
-        meta_bill = c.execute("SELECT id FROM statistics_meta WHERE statistic_id='crcgas:monthly_bill_amount'").fetchone()
-        if meta_bill:
-            existing_bills = c.execute("SELECT start_ts, sum FROM statistics WHERE metadata_id=? ORDER BY start_ts DESC LIMIT 1", (meta_bill[0],)).fetchone()
-            if existing_bills:
-                last_bill_sum = existing_bills[1]
-
-        db_conn.close()
-    except Exception:
-        pass
-
-    # Find the last gas cumulative from the existing data
-    if existing_months:
-        # Use the existing last gas sum
-        pass  # last_gas_sum already set above
-
-    new_gas_stats = []
-    new_bill_stats = []
-    cumulative_gas = last_gas_sum
-    cumulative_bill = last_bill_sum
-
-    for bill in sorted_bills:
-        ym = bill.get("billYm", "")
-        if not ym or len(ym) < 7:
-            continue
-        if ym in existing_months:
-            # Skip existing months (already in statistics)
-            continue
-        year, month = int(ym[:4]), int(ym[5:7])
-        gas_amt = number(bill.get("gasAmt"))
-        bill_amt = number(bill.get("billAmt"))
-        if gas_amt is None or bill_amt is None:
-            continue
-        cumulative_gas += gas_amt
-        cumulative_bill += bill_amt
-        start = datetime(year, month, 1, tzinfo=timezone.utc)
-
-        new_gas_stats.append({
-            "start": start, "state": gas_amt, "sum": cumulative_gas,
-            "min": gas_amt, "max": gas_amt, "mean": 0.0, "mean_weight": 0.0,
-            "last_reset": start,
-        })
-        new_bill_stats.append({
-            "start": start, "state": bill_amt, "sum": cumulative_bill,
-            "min": bill_amt, "max": bill_amt, "mean": 0.0, "mean_weight": 0.0,
-            "last_reset": start,
-        })
-
-    # Only inject if we have data
-    if new_gas_stats:
-        gas_metadata = StatisticMetaData(
-            has_mean=False, has_sum=True,
-            name="历史月度用气量", source=DOMAIN,
-            statistic_id=f"{DOMAIN}:monthly_gas_usage",
-            unit_of_measurement="m³",
-            mean_type=StatisticMeanType.NONE,
-        )
-        async_add_external_statistics(hass, gas_metadata, new_gas_stats)
-        _LOGGER.info("已导入 %d 条用气量统计（累计从 %.1f 开始）", len(new_gas_stats), last_gas_sum)
-
-    if new_bill_stats:
-        bill_metadata = StatisticMetaData(
-            has_mean=False, has_sum=True,
-            name="历史月度燃气费", source=DOMAIN,
-            statistic_id=f"{DOMAIN}:monthly_bill_amount",
-            unit_of_measurement="CNY",
-            mean_type=StatisticMeanType.NONE,
-        )
-        async_add_external_statistics(hass, bill_metadata, new_bill_stats)
-        _LOGGER.info("已导入 %d 条燃气费统计（累计从 %.1f 开始）", len(new_bill_stats), last_bill_sum)
-
+    for index, (key, name, unit) in enumerate((
+        ("monthly_gas_usage", "历史月度用气量", "m³"),
+        ("monthly_bill_amount", "历史月度燃气费", "CNY"),
+    )):
+        rows = existing[key]
+        # Preserve months not present in the local cache and existing time anchors.
+        values = {}
+        starts = {}
+        baseline = 0.0
+        for ts, state, total in rows:
+            dt = datetime.fromtimestamp(ts, timezone.utc)
+            ym = dt.strftime("%Y-%m")
+            value = number(state)
+            if value is None:
+                continue
+            if not values and number(total) is not None:
+                baseline = number(total) - value
+            values[ym] = value
+            starts[ym] = dt
+        if values and min(months) < min(values):
+            baseline = 0.0
+        values.update({ym: amounts[index] for ym, amounts in months.items()})
+        stats = []
+        cumulative = baseline
+        old_by_ts = {ts: (state, total) for ts, state, total in rows}
+        for ym, value in sorted(values.items()):
+            year, month = map(int, ym.split("-"))
+            start = starts.get(ym, datetime(year, month, 1, tzinfo=timezone.utc))
+            cumulative = round(cumulative + value, 6 if index == 0 else 2)
+            if old_by_ts.get(start.timestamp()) == (value, cumulative):
+                continue
+            stats.append({"start": start, "state": value, "sum": cumulative,
+                          "last_reset": start})
+        if stats:
+            async_add_external_statistics(hass, StatisticMetaData(
+                has_mean=False, has_sum=True, name=name, source=DOMAIN,
+                statistic_id=f"{DOMAIN}:{key}", unit_of_measurement=unit,
+                mean_type=StatisticMeanType.NONE,
+            ), stats)
 
 async def _import_meter_history_to_entity(hass, entry, bill_history, only_missing=False):
     """通过 sqlite3 直接写入历史累计统计到 recorder 数据库
@@ -572,6 +534,9 @@ async def _import_meter_history_to_entity(hass, entry, bill_history, only_missin
                 ).fetchone()
                 if cost_row:
                     cost_mid = cost_row[0]
+                    if only_missing and conn2.execute("SELECT 1 FROM statistics WHERE metadata_id=? LIMIT 1", (cost_mid,)).fetchone():
+                        conn2.rollback()
+                        return
                     conn2.execute("DELETE FROM statistics WHERE metadata_id = ?", (cost_mid,))
                     conn2.execute("DELETE FROM statistics_short_term WHERE metadata_id = ?", (cost_mid,))
                     cost_rows = [(cost_mid, ts, val, val, val, val, 0.0, common_reset_ts, now) for ts, val in cost_stats_data]
@@ -611,7 +576,7 @@ async def _import_meter_history_to_entity(hass, entry, bill_history, only_missin
                         "SELECT COUNT(*) FROM statistics WHERE metadata_id = ?",
                         (row[0],),
                     ).fetchone()
-                    if existing and existing[0] >= 10:
+                    if existing and existing[0] > 0:
                         _LOGGER.info("已有 %d 条历史累计记录(气量)，跳过", existing[0])
                         conn.rollback()
                         return
@@ -816,6 +781,8 @@ async def async_setup_entry(
         result.update(last_valid_tiers)
         result["tier_data_status"] = "stale" if last_valid_tiers else "unavailable"
         outcomes = {}
+        bills = []
+        chart = None
 
         def failure(name, exc):
             outcomes[name] = ("auth" if isinstance(exc, SessionTimeoutError) else
@@ -891,15 +858,19 @@ async def async_setup_entry(
 
                 if bills:
 
-                    last_bill = bills[0]
+                    bills = sorted((b for b in bills if isinstance(b, dict) and bill_month(b.get("billYm"))),
+                                   key=lambda b: b["billYm"], reverse=True)
+                    last_bill = bills[0] if bills else {}
 
                     result["_last_bill_ym"] = last_bill.get("billYm", "")
 
-                    result["_last_app_no"] = last_bill.get("applicationNo", "")
+                    result["_last_app_no"] = identifier(last_bill.get("applicationNo"))
 
                     result["last_bill_gas_amt"] = _numeric_value(last_bill.get("gasAmt"))
 
                     result["last_bill_penalty"] = _numeric_value(last_bill.get("penaltyAmt"))
+                    result["this_gas_used"] = result["last_bill_gas_amt"]
+                    result["penalty_amount"] = result["last_bill_penalty"]
 
                     result["settle_flag"] = last_bill.get("settleFlag", "未知")
                     result["revbl_amount"] = _numeric_value(last_bill.get("revblAmt"))
@@ -911,68 +882,9 @@ async def async_setup_entry(
                         from .history_storage import CRCGasHistoryStorage
                         hs = CRCGasHistoryStorage(hass, config_entry.entry_id)
                         await hs.async_load()
-                        existing_app_nos = {b["applicationNo"] for b in hs.get_bill_history(limit=999) if b.get("applicationNo")}
-                        new_bills = [b for b in bills if b.get("applicationNo") and b["applicationNo"] not in existing_app_nos
-                                     and number(b.get("gasAmt")) is not None and number(b.get("billAmt")) is not None]
-                        if new_bills:
-                            for nb in new_bills:
-                                await hs.async_add_bill_record(nb)
-                            _LOGGER.info(f"账单历史更新: 新增{len(new_bills)}条新账单")
-                            # 增量注入：只追加新月份
-                            try:
-                                from homeassistant.components.recorder.statistics import (
-                                    async_add_external_statistics, StatisticMetaData, StatisticMeanType)
-                                import sqlite3, os
-                                db_path = os.path.join(hass.config.path(), "home-assistant_v2.db")
-                                db_conn = sqlite3.connect(db_path)
-                                c = db_conn.cursor()
-                                
-                                # 获取最新累计值
-                                meta_gas = c.execute("SELECT id FROM statistics_meta WHERE statistic_id='crcgas:monthly_gas_usage'").fetchone()
-                                meta_bill = c.execute("SELECT id FROM statistics_meta WHERE statistic_id='crcgas:monthly_bill_amount'").fetchone()
-                                last_gas_sum = float(c.execute("SELECT sum FROM statistics WHERE metadata_id=? ORDER BY start_ts DESC LIMIT 1", (meta_gas[0],)).fetchone()[0]) if meta_gas else 0
-                                last_bill_sum = float(c.execute("SELECT sum FROM statistics WHERE metadata_id=? ORDER BY start_ts DESC LIMIT 1", (meta_bill[0],)).fetchone()[0]) if meta_bill else 0
-                                db_conn.close()
-                                
-                                for nb in new_bills:
-                                    ym = nb.get("billYm", "")
-                                    if len(ym) < 7: continue
-                                    year, month = int(ym[:4]), int(ym[5:7])
-                                    gas_amt = number(nb.get("gasAmt"))
-                                    bill_amt = number(nb.get("billAmt"))
-                                    start = datetime(year, month, 1, tzinfo=timezone.utc)
-                                    
-                                    last_gas_sum += gas_amt
-                                    last_bill_sum += bill_amt
-                                    
-                                    # 用气量
-                                    async_add_external_statistics(hass, StatisticMetaData(
-                                        has_mean=False, has_sum=True,
-                                        name="历史月度用气量", source="crcgas",
-                                        statistic_id="crcgas:monthly_gas_usage",
-                                        unit_of_measurement="m\u00b3",
-                                        mean_type=StatisticMeanType.NONE,
-                                    ), [{
-                                        "start": start, "state": gas_amt, "sum": last_gas_sum,
-                                        "min": gas_amt, "max": gas_amt, "mean": 0.0, "mean_weight": 0.0,
-                                        "last_reset": start,
-                                    }])
-                                    
-                                    # 费用
-                                    async_add_external_statistics(hass, StatisticMetaData(
-                                        has_mean=False, has_sum=True,
-                                        name="历史月度燃气费", source="crcgas",
-                                        statistic_id="crcgas:monthly_bill_amount",
-                                        unit_of_measurement="CNY",
-                                        mean_type=StatisticMeanType.NONE,
-                                    ), [{
-                                        "start": start, "state": bill_amt, "sum": last_bill_sum,
-                                        "min": bill_amt, "max": bill_amt, "mean": 0.0, "mean_weight": 0.0,
-                                        "last_reset": start,
-                                    }])
-                                    _LOGGER.info(f"增量注入: {ym} 用气={gas_amt}m\u00b3 累计={last_gas_sum}m\u00b3")
-                            except Exception as e_inc:
-                                _LOGGER.warning(f"增量注入失败: {e_inc}")
+                        counts = await hs.async_merge_bills(bills)
+                        if counts["new"] or counts["updated"]:
+                            await _import_history_statistics(hass, config_entry, hs.get_bill_history(limit=999))
                     except Exception as e_h:
                         _LOGGER.debug(f"账单历史更新跳过: {e_h}")
 
@@ -998,25 +910,17 @@ async def async_setup_entry(
 
                     if isinstance(dr.get("lastGas"), list) and isinstance(dr.get("thisGas"), list):
                         outcomes["chart"] = "ok"
-                    last_gas = dr.get("lastGas", [])
-
-                    if len(last_gas) > 1:
-
-                        result["last_month_gas"] = number(last_gas[1])
-
-                    all_gas = [n for g in last_gas if (n := number(g)) is not None]
-
-                    if all_gas:
-
-                        result["year_avg_gas"] = round(sum(all_gas) / len(all_gas), 1)
-
-                    # 统计本年累计用气（thisGas 前几个非空值之和）
+                    chart = dr
                     this_gas = dr.get("thisGas", [])
-                    valid_this = [n for g in this_gas if (n := number(g)) is not None]
-                    if valid_this:
-                        result["annual_gas_used"] = sum(valid_this)
-                    else:
-                        result["annual_gas_used"] = None
+                    if isinstance(this_gas, list):
+                        valid_this = [n for g in this_gas if (n := number(g)) is not None]
+                        if valid_this:
+                            result["annual_gas_used"] = sum(valid_this)
+                            result["year_avg_gas"] = round(sum(valid_this) / len(valid_this), 1)
+
+            result["last_month_gas"] = previous_usage(
+                bills, result.get("_last_bill_ym"), chart, dt_util.now().year
+            )
 
         except Exception as e:
 
@@ -1024,6 +928,10 @@ async def async_setup_entry(
             _LOGGER.warning("获取月度用气图表失败: %s", type(e).__name__)
 
 
+
+        # 即使图表请求失败，仍从账单列表读取上一账期。
+        if result["last_month_gas"] is None:
+            result["last_month_gas"] = previous_usage(bills, result.get("_last_bill_ym"))
 
         # 5. 获取账单详情（本期读数、用气量、账单金额）
 
@@ -1033,7 +941,7 @@ async def async_setup_entry(
 
             app_no = result.get("_last_app_no", "")
 
-            if bill_ym and app_no:
+            if bill_month(bill_ym):
 
                 outcomes["detail"] = "api"
                 detail_data = await api.async_get_bill_detail(cons_no, bill_ym, app_no)
@@ -1045,22 +953,24 @@ async def async_setup_entry(
                     if details and isinstance(details, list):
 
                         detail = details[0]
-                        if isinstance(detail, dict):
+                        if not isinstance(detail, dict):
+                            raise ValueError("invalid bill detail")
+                        if all(number(detail.get(k)) is not None for k in ("thisRead", "lastRead", "gasUsed")) and all(read_date(detail.get(k)) != "未知" for k in ("thisReadTime", "lastReadTime")):
                             outcomes["detail"] = "ok"
 
                         result["this_read"] = number(detail.get("thisRead"))
 
-                        result["this_read_time"] = detail.get("thisReadTime", "未知")
+                        result["this_read_time"] = read_date(detail.get("thisReadTime"))
 
                         result["last_read"] = number(detail.get("lastRead"))
 
-                        result["last_read_time"] = detail.get("lastReadTime", "未知")
+                        result["last_read_time"] = read_date(detail.get("lastReadTime"))
 
                         result["this_gas_used"] = _first_number(detail.get("gasUsed"), result.get("last_bill_gas_amt"))
 
                         result["bill_amount"] = _first_number(detail.get("totalAmount"), detail.get("billAmount"), result.get("revbl_amount"))
 
-                        result["penalty_amount"] = number(detail.get("penaltyAmount"))
+                        result["penalty_amount"] = _first_number(detail.get("penaltyAmount"), result.get("last_bill_penalty"))
 
                         result.update(parse_bill_steps(
                             detail.get("gasStepList"), result["this_gas_used"]
@@ -1077,7 +987,8 @@ async def async_setup_entry(
 
             else:
 
-                _LOGGER.warning(f"缺少账单信息: bill_ym={bill_ym}, app_no={app_no}")
+                outcomes["detail"] = "api"
+                _LOGGER.warning("缺少有效账单月份，无法查询账单详情")
 
         except Exception as e:
 
@@ -1401,7 +1312,7 @@ async def async_setup_entry(
                 if bill_history:
                     try:
                         await _import_meter_history_to_entity(hass, config_entry, bill_history, only_missing=True)
-                        _import_history_statistics(hass, config_entry, bill_history)
+                        await _import_history_statistics(hass, config_entry, bill_history)
                         _LOGGER.info(f"首次统计注入完成: {len(bill_history)}条账单")
                     except Exception as e_inj:
                         _LOGGER.warning(f"首次统计注入失败: {e_inj}")
@@ -1434,6 +1345,7 @@ async def async_setup_entry(
         try:
 
             result = await storage.async_fetch_all_bills(api, cons_no)
+            await _import_history_statistics(hass, config_entry, storage.get_bill_history(limit=999))
 
             _LOGGER.info(
 
