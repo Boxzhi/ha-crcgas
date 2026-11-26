@@ -49,8 +49,9 @@ def merge_bill(records, row, timestamp):
     merged = {}
     for i in matches:
         merged.update(records[i])
+    known_id = identifier(merged.get("id"))
     merged.update(row)
-    merged["id"] = identifier(row.get("id")) or identifier(merged.get("id"))
+    merged["id"] = identifier(row.get("id")) or known_id
     # An empty application number is legitimate; retain a known alias for deduplication.
     merged["applicationNo"] = (identifier(row.get("applicationNo"))
                                or next((identifier(records[i].get("applicationNo"))
@@ -103,3 +104,25 @@ def monthly_totals(records):
         months[ym] = (round(gas + number(row["gasAmt"]), 6),
                       round(cost + number(row["billAmt"]), 2))
     return months
+
+def select_detail(details, expected_id):
+    """Prefer the matching official bill; never substitute another bill's detail."""
+    if not isinstance(details, list):
+        return None
+    rows = [row for row in details if isinstance(row, dict)]
+    expected_id = identifier(expected_id)
+    if expected_id:
+        for row in rows:
+            if identifier(row.get("id")) == expected_id:
+                return row
+    if len(rows) == 1 and (not expected_id or not identifier(rows[0].get("id"))):
+        return rows[0]
+    return None
+
+
+def detail_complete(detail):
+    return (isinstance(detail, dict)
+            and all(number(detail.get(key)) is not None
+                    for key in ("thisRead", "lastRead", "gasUsed"))
+            and all(read_date(detail.get(key)) != "未知"
+                    for key in ("thisReadTime", "lastReadTime")))

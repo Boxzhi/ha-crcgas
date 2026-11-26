@@ -1,0 +1,54 @@
+name: Publish v2.1.7
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-v2.1.7.yml'
+permissions:
+  contents: write
+jobs:
+  test:
+    if: github.repository == 'Boxzhi/ha-crcgas'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python -m compileall -q custom_components/crcgas
+      - run: python -m unittest discover -s tests -v
+      - run: node --test tests/test_cards.cjs
+  validate:
+    if: github.repository == 'Boxzhi/ha-crcgas'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master
+  publish:
+    needs: [test, validate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Publish tested revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(python -c 'import json; print(json.load(open("custom_components/crcgas/manifest.json"))["version"])')" = "2.1.7"
+          if gh release view v2.1.7 >/dev/null 2>&1; then
+            exit 0
+          fi
+          if gh api "repos/$GH_REPO/git/ref/tags/v2.1.7" >/dev/null 2>&1; then
+            echo "Existing tag requires verification"
+            exit 1
+          fi
+          sed -n '/^## 2\.1\.7 /,/^## 2\.1\.6 /p' CHANGELOG.md | sed '1d;$d' > release-notes.md
+          gh release create v2.1.7 --target "$GITHUB_SHA" --title "v2.1.7" --notes-file release-notes.md --latest

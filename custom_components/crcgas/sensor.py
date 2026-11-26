@@ -31,7 +31,7 @@ from homeassistant.components.sensor.const import SensorStateClass as _SSC
 from .api import HuarunGasApi, SessionTimeoutError, TransportError
 from .health import BalanceSnapshot, integration_status
 from .tiers import TIER_KEYS, parse_tiers, parse_bill_steps, number
-from .bills import bill_month, read_date, identifier, previous_usage, monthly_totals
+from .bills import bill_month, read_date, identifier, previous_usage, monthly_totals, select_detail, detail_complete
 from .payment_storage import PAYMENT_KEYS, PaymentHistory
 from .schedule import RefreshTimer, effective_schedule
 from .const import (
@@ -865,6 +865,7 @@ async def async_setup_entry(
                     result["_last_bill_ym"] = last_bill.get("billYm", "")
 
                     result["_last_app_no"] = identifier(last_bill.get("applicationNo"))
+                    result["_last_bill_id"] = identifier(last_bill.get("id"))
 
                     result["last_bill_gas_amt"] = _numeric_value(last_bill.get("gasAmt"))
 
@@ -948,14 +949,10 @@ async def async_setup_entry(
 
                 if detail_data and detail_data.get("success"):
 
-                    details = detail_data.get("dataResult", [])
+                    detail = select_detail(detail_data.get("dataResult"), result.get("_last_bill_id"))
 
-                    if details and isinstance(details, list):
-
-                        detail = details[0]
-                        if not isinstance(detail, dict):
-                            raise ValueError("invalid bill detail")
-                        if all(number(detail.get(k)) is not None for k in ("thisRead", "lastRead", "gasUsed")) and all(read_date(detail.get(k)) != "未知" for k in ("thisReadTime", "lastReadTime")):
+                    if detail is not None:
+                        if detail_complete(detail):
                             outcomes["detail"] = "ok"
 
                         result["this_read"] = number(detail.get("thisRead"))
@@ -1344,8 +1341,10 @@ async def async_setup_entry(
 
         try:
 
-            result = await storage.async_fetch_all_bills(api, cons_no)
-            await _import_history_statistics(hass, config_entry, storage.get_bill_history(limit=999))
+            async with update_lock:
+                await storage.async_load()
+                result = await storage.async_fetch_all_bills(api, cons_no)
+                await _import_history_statistics(hass, config_entry, storage.get_bill_history(limit=999))
 
             _LOGGER.info(
 

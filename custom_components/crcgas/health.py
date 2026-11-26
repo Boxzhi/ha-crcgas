@@ -32,7 +32,7 @@ class BalanceSnapshot:
 
 
 def integration_status(outcomes, session_dead=False):
-    """Classify actual attempted calls; skipped bill detail is not a failure."""
+    """Classify update outcomes; callers mark missing required data as api error."""
     values = list(outcomes.values())
     if values and all(v == "ok" for v in values):
         return "normal"

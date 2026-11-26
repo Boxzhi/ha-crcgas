@@ -8,7 +8,7 @@ import unittest
 pkg = types.ModuleType("crcgas_bill_test")
 pkg.__path__ = [str(Path(__file__).resolve().parents[1] / "custom_components/crcgas")]
 sys.modules[pkg.__name__] = pkg
-from crcgas_bill_test.bills import (merge_bill, previous_usage, read_date, monthly_totals)
+from crcgas_bill_test.bills import (merge_bill, previous_usage, read_date, monthly_totals, select_detail, detail_complete)
 
 
 class BillTests(unittest.TestCase):
@@ -44,3 +44,17 @@ class BillTests(unittest.TestCase):
         self.assertEqual(read_date("2026/11/24"), "2026-11-24")
         self.assertEqual(read_date("2026-10-24"), "2026-10-24")
         self.assertEqual(read_date("2026-02-30"), "未知")
+
+    def test_preserve_id_when_legacy_row_arrives(self):
+        rows = [dict(id="one", applicationNo="old", billYm="2026-10", gasAmt=19, billAmt=60.61)]
+        row = dict(rows[0], id="")
+        self.assertEqual(merge_bill(rows, row, "now"), "updated")
+        self.assertEqual(rows[0]["id"], "one")
+
+    def test_detail_fixture_and_wrong_id(self):
+        row = dict(id="one", thisRead=377, lastRead=349, gasUsed=28,
+                   thisReadTime="2026/11/24", lastReadTime="2026-10-24")
+        self.assertEqual(select_detail([row], "one"), row)
+        self.assertTrue(detail_complete(row))
+        self.assertIsNone(select_detail([row], "different"))
+        self.assertFalse(detail_complete(dict(row, thisReadTime="")))
